@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>System status</h2>
+  <table class="kv">
+    <tr><th>Data folder</th><td class="mono">{{ settings.home }}</td></tr>
+    <tr><th>Dhan credentials</th><td><span class="pill {{ 'ok' if settings.dhan_credentials == 'set' else 'warn' }}">{{ settings.dhan_credentials }}</span></td></tr>
+    {% for name, n in datasets.items() %}
+    <tr><th>{{ name.replace('_', ' ') }}</th><td class="num">{{ n }} partitions</td></tr>
+    {% endfor %}
+  </table>
+</section>
+<section class="panel">
+  <h2>Research runs</h2>
+  <p class="muted">No backtests have been run. The first one (Strategy 1, NIFTY) is Phase 3 and needs validated data from Phase 2.</p>
+</section>
+<section class="panel">
+  <h2>Data quality</h2>
+  {% if coverage %}
+    <p>Latest coverage report: {{ coverage.generated_at }}. <a href="/market-data">Open in Market Data</a>.</p>
+  {% else %}
+    <p class="muted">No coverage report yet. Run <code>straddloop dhan-sample</code> to pull the Phase 2 sample.</p>
+  {% endif %}
+</section>
+{% endblock %}

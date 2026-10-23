@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Configuration</h2>
+  <table class="kv">
+    <tr><th>Data folder</th><td class="mono">{{ settings.home }}</td></tr>
+    <tr><th>Dhan credentials</th><td>{{ settings.dhan_credentials }} (values are never displayed)</td></tr>
+    <tr><th>Dhan request rate</th><td class="num">{{ settings.dhan_requests_per_second }} per second</td></tr>
+    <tr><th>Live order placement</th><td><span class="pill warn">disabled</span> (Phase 12, explicit approval required)</td></tr>
+  </table>
+</section>
+<section class="panel">
+  <h2>Cost schedules</h2>
+  {% for exchange, items in schedules %}
+    <h3>{{ exchange }}</h3>
+    {% if not items %}
+      <p class="muted">No verified schedule. Backtests on this exchange stop with an error until rates are entered and verified.</p>
+    {% else %}
+    <table class="grid">
+      <thead><tr><th>Schedule</th><th>From</th><th class="num">STT on sell premium</th><th class="num">Exchange charge</th><th class="num">SEBI ₹/crore</th><th class="num">Stamp on buys</th><th class="num">GST</th></tr></thead>
+      <tbody>
+      {% for s in items %}
+        <tr>
+          <td>{{ s.id }}</td><td>{{ s.effective_from }}</td>
+          {% for key in ['stt_sell_premium', 'exchange_txn'] %}
+            <td class="num">{{ '%.4f'|format(s[key].value * 100) }}% {% if not s[key].verified %}<span class="pill warn">unverified</span>{% endif %}</td>
+          {% endfor %}
+          <td class="num">{{ s.sebi_per_crore.value }} {% if not s.sebi_per_crore.verified %}<span class="pill warn">unverified</span>{% endif %}</td>
+          <td class="num">{{ '%.4f'|format(s.stamp_buy.value * 100) }}% {% if not s.stamp_buy.verified %}<span class="pill warn">unverified</span>{% endif %}</td>
+          <td class="num">{{ '%.0f'|format(s.gst.value * 100) }}%</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  {% endfor %}
+</section>
+{% endblock %}

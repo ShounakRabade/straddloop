@@ -1,0 +1,19 @@
+# secrets and personal data never go into Git
+.env
+*.token
+secrets/
+
+# market data and run outputs live outside the repository history
+/data/
+/runs/
+*.parquet
+*.duckdb
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/

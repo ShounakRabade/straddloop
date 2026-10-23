@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en-IN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ section[1] }} · Straddloop</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="sidebar" aria-label="Sections">
+    <div class="brand">Straddloop <span class="muted">v{{ version }}</span></div>
+    <ul>
+      {% for slug, title, status, phase, purpose in sections %}
+      <li>
+        <a href="/{{ slug }}" class="{{ 'active' if slug == active }}">
+          <span>{{ title }}</span>
+          {% if status == 'planned' %}<span class="tag">Phase {{ phase }}</span>{% endif %}
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
+    <p class="mode">Mode: historical research. Live orders: disabled.</p>
+  </nav>
+  <main>
+    <header class="page-head">
+      <h1>{{ section[1] }}</h1>
+      <p class="muted">{{ section[4] }}</p>
+    </header>
+    {% block content %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>

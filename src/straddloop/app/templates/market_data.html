@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Coverage</h2>
+  {% if not coverage or (not coverage.underlying and not coverage.options) %}
+    <p class="muted">The store is empty, so no coverage is claimed. Pull the sample with
+      <code>straddloop dhan-sample --underlying NIFTY --start 2026-09-01 --end 2026-10-01</code>.</p>
+  {% else %}
+    <p class="muted">Generated {{ coverage.generated_at }} · dataset hashes {{ coverage.dataset_hashes }}</p>
+    {% if coverage.underlying %}
+    <h3>Underlying candles</h3>
+    <table class="grid">
+      <thead><tr><th>Underlying</th><th>First</th><th>Last</th><th class="num">Sessions</th><th class="num">Missing minutes %</th><th>Label</th></tr></thead>
+      <tbody>
+      {% for name, r in coverage.underlying.items() %}
+        <tr><td>{{ name }}</td><td>{{ r.first_session }}</td><td>{{ r.last_session }}</td><td class="num">{{ r.sessions }}</td><td class="num">{{ r.missing_minutes_pct }}</td><td>{{ r.timestamp_label }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if coverage.options %}
+    <h3>Option candles</h3>
+    <table class="grid">
+      <thead><tr><th>Series</th><th>First</th><th>Last</th><th class="num">Sessions</th><th class="num">Zero-volume %</th><th class="num">Stale %</th><th class="num">Full-session contracts %</th><th>Expiries resolved</th></tr></thead>
+      <tbody>
+      {% for name, r in coverage.options.items() %}
+        <tr><td>{{ name }}</td><td>{{ r.first_session }}</td><td>{{ r.last_session }}</td><td class="num">{{ r.sessions }}</td><td class="num">{{ r.zero_volume_pct }}</td><td class="num">{{ r.stale_pct }}</td><td class="num">{{ r.fixed_contracts_full_session_pct }}</td><td>{{ 'yes' if r.expiry_dates_resolved else 'no' }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    <h3>Known limitations</h3>
+    <ul>{% for item in coverage.known_limitations %}<li>{{ item }}</li>{% endfor %}</ul>
+  {% endif %}
+</section>
+<section class="panel">
+  <h2>Providers</h2>
+  <table class="grid">
+    <thead><tr><th>Provider</th><th>Expired options</th><th>Fixed-contract history</th><th>Bid/ask history</th><th class="num">Window</th><th>Intervals (min)</th><th class="num">Years</th></tr></thead>
+    <tbody>
+    {% for p in providers %}
+      <tr><td>{{ p.name }}</td><td>{{ 'yes' if p.expired_options else 'no' }}</td><td>{{ 'yes' if p.fixed_contract_history else 'no' }}</td><td>{{ 'yes' if p.bid_ask_history else 'no' }}</td><td class="num">ATM±{{ p.max_moneyness_offset }}</td><td>{{ p.intervals_min|join(', ') }}</td><td class="num">{{ p.history_years }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% for p in providers %}<p class="muted">{{ p.name }}: {{ p.notes }}</p>{% endfor %}
+</section>
+{% endblock %}
