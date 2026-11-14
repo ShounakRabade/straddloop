@@ -56,3 +56,10 @@ Validated candles go to `data/store/` as Parquet. Reports go to `data/reports/`.
 * Missing prices are flagged, never filled with estimates.
 * Costs come from dated schedules; an exchange or period without a schedule stops the run.
 * Secrets live only in `.env` (ignored by Git) and are never logged or displayed.
+
+## Website
+
+`web/` holds the Straddloop website (Next.js, Supabase, Vercel): the three strategy rule sets, a
+browser lab on synthetic data, onboarding and a notebook of saved runs. See `web/README.md` for
+local setup, the Supabase schema and Vercel deployment. Every figure on the site is synthetic and
+nothing on it is investment advice.
