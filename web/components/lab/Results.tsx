@@ -88,7 +88,7 @@ export function Exec({ r, busy, baseline }: { r: RunResult; busy: boolean; basel
     return (
       <div className="exec" data-busy={busy} aria-label="Headline results">
         <Metric k="net" lead label="Net P&L" tip={GLOSSARY.net} value={inr(r.net, { sign: true })} cls={tone(r.net)} sub={<>Gross {inr(r.gross, { sign: true })} · charges {inr(r.costs)}</>} delta={deltaOf('net', r.net, baseline, money)} />
-        <Metric k="avg" label={`Average ${r.unit}`} tip={GLOSSARY.ci} value={inr(r.avg, { sign: true })} cls={tone(r.avg)} sub={ok ? <>95% range {inr(r.ci[0], { sign: true })} to {inr(r.ci[1], { sign: true })}</> : 'Range needs 2+ traded periods'} />
+        <Metric k="avg" label={`Average ${r.unit}`} tip={GLOSSARY.ci} value={inr(r.avg, { sign: true })} cls={tone(r.avg)} sub={ok && r.ci ? <>95% range {inr(r.ci[0], { sign: true })} to {inr(r.ci[1], { sign: true })}</> : 'Range needs 2+ traded periods'} />
         <Metric k="trades" label="Months traded" tip={GLOSSARY.trades} value={<>{r.traded}</>} sub={`of ${r.sessions} stock-months`} />
         <Metric k="win_rate" label="Win rate" tip={GLOSSARY.win_rate} value={pct2(r.winRate, 1)} sub="of traded months" delta={deltaOf('win_rate', r.winRate, baseline, (v) => `${v.toFixed(1)}%`)} />
         <Metric k="pf" label="Profit factor" tip={GLOSSARY.profit_factor} value={r.profitFactor == null ? NA : num2(r.profitFactor)} />
@@ -135,7 +135,7 @@ export function Exec({ r, busy, baseline }: { r: RunResult; busy: boolean; basel
 export function verdictLine(r: RunResult, real: boolean): string {
   const sample = real ? 'these real NIFTY days' : 'this synthetic sample';
   if (!r.traded) return 'No trades were taken with these settings.';
-  if (r.traded < 2) return `One traded ${r.unit} is not evidence either way.`;
+  if (r.traded < 2 || !r.ci) return `One traded ${r.unit} is not evidence either way.`;
   const [lo, hi] = r.ci;
   if (lo > 0) return `Positive on ${sample}, and the 95% range stays above zero.`;
   if (hi < 0) return `A reliable loss on ${sample}: the whole 95% range is below zero.`;
@@ -178,7 +178,7 @@ function Overview({ r, trades, real, slip, go }: { r: RunResult; trades: LedgerR
         ) : <p className="sec-note">No closed positions.</p>}
         <dl className="cov" style={{ marginTop: 12 }}>
           <dt>Average {r.unit === 'day' ? 'traded day' : r.unit}</dt><dd className={tone(r.avg)}>{r.traded ? inr(r.avg, { sign: true }) : '—'}</dd>
-          <dt>95% range of the average <Tip label="95% range" text={GLOSSARY.ci} /></dt><dd>{ok ? `${inr(r.ci[0], { sign: true })} to ${inr(r.ci[1], { sign: true })}` : `needs 2+ traded ${r.unit}s`}</dd>
+          <dt>95% range of the average <Tip label="95% range" text={GLOSSARY.ci} /></dt><dd>{ok && r.ci ? `${inr(r.ci[0], { sign: true })} to ${inr(r.ci[1], { sign: true })}` : `needs 2+ traded ${r.unit}s`}</dd>
           {r.traded > 0 && (r.worst < 0
             ? <><dt>Worst / best {r.unit}</dt><dd><span className="loss">{inr(r.worst, { sign: true })}</span> / <span className={tone(r.best)}>{inr(r.best, { sign: true })}</span></dd></>
             : <><dt>Every traded {r.unit} gained; smallest / largest</dt><dd><span className={tone(r.worst)}>{inr(r.worst, { sign: true })}</span> / <span className={tone(r.best)}>{inr(r.best, { sign: true })}</span></dd></>)}

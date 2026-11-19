@@ -331,6 +331,9 @@
   }
 
   // ------------------------------------------------------------------ the report
+  // Two-sided 95% Student t multiplier (z = 1.96 understates the interval badly below ~30 observations).
+  const T95 = [0, 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042];
+  const t95 = df => (df <= 30 ? T95[df] : df <= 60 ? 2.042 - 0.042 * (df - 30) / 30 : df <= 120 ? 2.0 - 0.02 * (df - 60) / 60 : 1.96);
   function stdev(xs) { const n = xs.length; if (n < 2) return 0; const m = sum(xs) / n; return Math.sqrt(sum(xs.map(x => (x - m) ** 2)) / (n - 1)); }
   function dayDiff(a, b) { return Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 86400000); }
 
@@ -452,9 +455,9 @@
         risk_reward: winsN.length && lossN.length && netLossSum < 0 ? (netProfitSum / winsN.length) / -(netLossSum / lossN.length) : null,
         expectancy: nT ? tMean : null, largest_win: nT ? Math.max(...tNet) : null, largest_loss: nT ? Math.min(...tNet) : null,
         mean_per_traded_day: tradedDays.length ? dMean : null, sd_per_traded_day: tradedDays.length > 1 ? dSd : null,
-        ci95_traded_day: tradedDays.length > 1 ? [dMean - 1.96 * dSd / Math.sqrt(tradedDays.length), dMean + 1.96 * dSd / Math.sqrt(tradedDays.length)] : null,
+        ci95_traded_day: tradedDays.length > 1 ? [dMean - t95(tradedDays.length - 1) * dSd / Math.sqrt(tradedDays.length), dMean + t95(tradedDays.length - 1) * dSd / Math.sqrt(tradedDays.length)] : null,
         t_stat_traded_day: tradedDays.length > 1 && dSd > 0 ? dMean / (dSd / Math.sqrt(tradedDays.length)) : null,
-        ci95_trade: nT > 1 ? [tMean - 1.96 * tSd / Math.sqrt(nT), tMean + 1.96 * tSd / Math.sqrt(nT)] : null,
+        ci95_trade: nT > 1 ? [tMean - t95(nT - 1) * tSd / Math.sqrt(nT), tMean + t95(nT - 1) * tSd / Math.sqrt(nT)] : null,
         t_stat_trade: nT > 1 && tSd > 0 ? tMean / (tSd / Math.sqrt(nT)) : null,
         winning_days: tradedDays.filter(d => d.net_realised > 0).length, losing_days: tradedDays.filter(d => d.net_realised <= 0).length,
         best_day: tradedDays.length ? Math.max(...dayNets) : null, worst_day: tradedDays.length ? Math.min(...dayNets) : null,

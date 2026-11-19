@@ -81,8 +81,8 @@ export function narrate(r: RunResult, ctx: { trades?: LedgerRow[] | null; slipPc
 
   // Reliability
   const rel: string[] = [];
-  const [lo, hi] = r.ci;
-  if (r.traded < 2) rel.push(`One ${r.unit} is not evidence: there is no spread to measure.`);
+  const [lo, hi] = r.ci ?? [r.avg, r.avg];
+  if (r.traded < 2 || !r.ci) rel.push(`One ${r.unit} is not evidence: there is no spread to measure.`);
   else if (lo > 0 || hi < 0) rel.push(`The 95% range for the average ${r.unit} is ${inr(lo, { sign: true })} to ${inr(hi, { sign: true })}; it does not include zero${r.traded < 30 ? `, but ${r.traded} ${unitOf(r, r.traded)} is a small sample` : ''}.`);
   else rel.push(`The 95% range for the average ${r.unit} is ${inr(lo, { sign: true })} to ${inr(hi, { sign: true })}. It includes zero, so this sample cannot tell the rule from luck.`);
   if (r.traded < 30) rel.push(`Fewer than 30 ${unitOf(r, 2)}: treat every ratio here, Sharpe included, as unreliable.`);

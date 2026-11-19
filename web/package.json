@@ -8,7 +8,7 @@
     "start": "next start",
     "precompute": "node scripts/precompute.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/ledger.test.mjs tests/daterange.test.mts tests/outcomes.test.mjs tests/workspace.test.mts"
+    "test": "node --test tests/ledger.test.mjs tests/daterange.test.mts tests/outcomes.test.mjs tests/workspace.test.mts tests/analytics.test.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.119.0",
