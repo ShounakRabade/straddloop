@@ -6,6 +6,8 @@ import { ParamFields } from '@/components/ParamFields';
 import { Curve, Exits, Kpis, verdict } from '@/components/ResultView';
 import { ReplayPanel } from '@/components/Replay';
 import { ReportPanel } from '@/components/Report';
+import { ResearchPanel } from '@/components/research/ResearchPanel';
+import { ENGINE_ONLY_KEYS, PARAM_SPACE, choiceLabel } from '@/lib/researchSpace';
 import { checkRange } from '@/lib/range';
 import { STRATEGIES, SYNTHETIC_KEYS, bySlug, describeParams } from '@/lib/strategies';
 import { useLab, type DayRef } from '@/lib/useLab';
@@ -49,6 +51,7 @@ export function LabClient() {
   const [range, setRange] = useState<{ from: string; to: string }>({ from: '', to: '' });
   const [loading, setLoading] = useState<{ done: number; total: number } | null>(null);
   const [dataErr, setDataErr] = useState<string | null>(null);
+  const [beforeLoad, setBeforeLoad] = useState<Params | null>(null);  // the person's settings before they loaded a study's selection
   const lab = useLab();
   const strategy = bySlug(slug)!;
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -143,7 +146,11 @@ export function LabClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params, booted, real, chosen]);
 
-  const pick = (next: StrategySlug) => { setSlug(next); setParams(bySlug(next)!.defaults); setNote(''); };
+  const pick = (next: StrategySlug) => { setSlug(next); setParams(bySlug(next)!.defaults); setNote(''); setBeforeLoad(null); };
+  /** Only ever called by the person pressing "Load" in the optimisation lab. */
+  const loadFromStudy = (changes: Record<string, unknown>) => { setBeforeLoad(params); setParams((p) => ({ ...p, ...(changes as Params) })); };
+  const engineSet = ENGINE_ONLY_KEYS.filter((k) => params[k] !== undefined);
+  const spaceLabel = (k: string) => [...PARAM_SPACE.straddle, ...PARAM_SPACE.orb].find((x) => x.key === k)?.label ?? k;
   const pickSource = (s: Source) => { setSource(s); try { localStorage.setItem(SOURCE_KEY, s); } catch { /* ignore */ } };
   const fields = useMemo(() => (real ? strategy.fields.filter((f) => !SYNTHETIC_KEYS.includes(f.key)) : strategy.fields), [real, strategy]);
   const changed = useMemo(() => describeParams({ ...strategy, fields }, params), [strategy, fields, params]);
@@ -205,7 +212,7 @@ export function LabClient() {
         <form className="lab-controls sheet" {...hard} onSubmit={(e) => e.preventDefault()} aria-label={`${strategy.short} settings`}>
           <div className="ctl-head">
             <span className="label">Settings</span>
-            <button type="button" className="link small" onClick={() => setParams(strategy.defaults)} disabled={!changed.length} style={{ opacity: changed.length ? 1 : 0.4 }}>Reset to defaults</button>
+            <button type="button" className="link small" onClick={() => { setParams(strategy.defaults); setBeforeLoad(null); }} disabled={!changed.length && !engineSet.length} style={{ opacity: changed.length || engineSet.length ? 1 : 0.4 }}>Reset to defaults</button>
           </div>
           <div className="ctl-body">
             <fieldset className="field" style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
@@ -286,6 +293,13 @@ export function LabClient() {
             )}
             <hr />
             <ParamFields idPrefix={slug} fields={fields} params={params} onChange={(k, val) => setParams((p) => ({ ...p, [k]: val }))} />
+            {(engineSet.length > 0 || beforeLoad) && (
+              <div className="rs-note small stack" style={{ ['--gap' as string]: '6px' }} role="status">
+                {engineSet.length > 0 && <p>Also set, with no field above: {engineSet.map((k) => `${spaceLabel(k)} ${choiceLabel(params[k])}`).join(' · ')}.{' '}
+                  <button type="button" className="link" onClick={() => setParams((p) => { const q = { ...p }; engineSet.forEach((k) => delete q[k]); return q; })}>Clear these</button></p>}
+                {beforeLoad && <p>Loaded from the optimisation lab.{' '}<button type="button" className="link" onClick={() => { setParams(beforeLoad); setBeforeLoad(null); }}>Put my settings back</button></p>}
+              </div>
+            )}
             <hr />
             <p className="small muted">Full rule text: <Link className="link" href={`/strategies/${slug}`}>{strategy.short} rules</Link></p>
           </div>
@@ -336,6 +350,12 @@ export function LabClient() {
               </div>
 
               <div className="fade-busy"><ReportPanel r={r} lab={lab} /></div>
+
+              <ResearchPanel r={r} lab={lab} params={params} msPerRun={Math.max(5, lab.ms)}
+                meta={{ oneLine: strategy.oneLine, changed: [...changed, ...engineSet.map((k) => `${spaceLabel(k)}: ${choiceLabel(params[k])}`)] }}
+                partial={real ? summary.counts.partial : 0}
+                dataNote={real && r.data && span ? `Stored real data runs from ${span.min} to ${span.max}; this run used ${r.data.days} of those sessions.` : null}
+                onLoad={loadFromStudy} />
 
               {r.strategy !== 'fourleg' && r.curve.length > 0 && <div className="fade-busy"><ReplayPanel r={r} load={lab.replay} /></div>}
 

@@ -235,4 +235,32 @@ never computed.
 | Research assistant | implemented-and-tested (grounding test) |
 | Bayesian optimisation | not implemented (reason above) |
 | Four-leg stock model | not covered: synthetic monthly model with no index candles or ledger |
-| Leg engine (`strategy: 'legs'`) | planned: `fromRun` already reads `RunResult.days` and closing equity; `evaluate` needs the leg engine's cfg builder when it lands |
+| Leg engine (`strategy: 'legs'`) | planned: `fromRun` already reads `RunResult.days` and closing equity; `evaluate` needs the leg engine's spec builder (`specFromTemplate`) and its parameter space when it lands. Until then the panel says it does not cover that strategy |
+
+## 9. The research panel in the Lab
+
+Below the account report, a **Research** panel works on the run above it, in the Lab's Web Worker, from the
+same ledger as the report (`compute.lastRun()`; research backtests use `compute.evaluate()`, which never
+replaces the run the page shows, its replay or its exports).
+
+| Tab | What it shows | When it computes |
+| --- | --- | --- |
+| Reading | The written reading, each figure numbered against a source list | Automatically after every run (no extra backtests) |
+| Regimes | Every dimension, with "known before entry" or "known only after the close", fixed or expanding-percentile thresholds, the inputs that are not available | Automatically |
+| Robustness | Score, verdict, the four separate assessments, every component with its formula and weight, Monte Carlo; a **robustness check** (thirds, one step either side of each setting, five cost scenarios, break-even slippage) | The check runs only when pressed |
+| Optimise | Choose settings and values, objective (or custom weights), grid/random and budget, minimum trades, split, walk-forward; then selected vs yours on train, validation, held-out test and the whole range, top 10, spread of all configurations, walk-forward folds, PBO, deflated Sharpe, sensitivity, cost stress, Monte Carlo | Only when "Run the study" is pressed; progress and Cancel |
+| Diagnostics | Overfitting, concentration and fragility checks with OK / Watch / Warning / Not measured, and the chronological models with their gates | Automatically; overfitting needs a study |
+
+Safeguards:
+
+- The study never changes the settings. **Load the selected settings into the Lab** is the only way, it is
+  disabled when the settings or dates changed after the study ran, and the settings panel then offers
+  **Put my settings back**. Saving to the notebook stays a separate action.
+- Settings the optimiser can search that have no field in the settings panel (exit time, re-entry cutoff,
+  daily loss cap, skip expiry day, opening-range width filter; ORB latest entry, exit time, max hold) are
+  listed in the settings panel whenever they are set, with **Clear these**, so a loaded value is never hidden.
+- A result from an earlier run is marked as such the moment the settings or dates change.
+- The time estimate first uses the Lab run's time as a ceiling ("at most about"), then the measured speed of
+  the last check or study.
+- Tables scroll inside their own box; at phone width (390 px) no tab scrolls the page sideways (checked in a
+  headless browser on every tab).
