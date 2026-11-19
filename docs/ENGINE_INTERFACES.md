@@ -1,8 +1,9 @@
 # Engine interfaces (v1)
 
 The contract between the research engine and everything built on it (Lab UI, analytics, reports).
-Status: **draft, 19 Nov 2026**. Fields marked *(planned)* are agreed but not in code yet; everything
-else is the shape the code will produce. Change this file in the same PR as any change to a shape.
+Status: **v1, 20 Nov 2026**, matches the code on `claude/leg-engine`. Fields marked *(planned)* are agreed but
+not in code yet; everything else is what the code produces. Change this file in the same PR as any change to a
+shape.
 
 Conventions used everywhere:
 
@@ -55,9 +56,14 @@ interface LegSpec {
 
 type StrikeRule =
   | { by: 'atm'; steps: number }             // + = steps out of the money for this leg's right, − = in the money
-  | { by: 'pct'; pct: number }               // + = % of spot out of the money, − = in; nearest listed strike
-  | { by: 'premium'; price: number; side: 'nearest' | 'at_most' | 'at_least' } // by entry-bar open price
-  | { by: 'delta'; delta: number }           // |delta| in (0, 1); only where the dataset has reliable Greeks
+  | { by: 'pct'; pct: number }               // + = % of spot out of the money, − = in; nearest listed strike,
+                                             //   an exact half-step goes away from ATM (at least the distance asked)
+  | { by: 'premium'; price: number; side: 'nearest' | 'at_most' | 'at_least' }
+                                             //   by the CLOSE of the bar before entry (what is known at the decision);
+                                             //   the order then fills at the entry bar's open, which can differ
+  | { by: 'delta'; delta: number }           // |delta| in (0, 1); only where the dataset has reliable Greeks.
+                                             //   Black-Scholes (r = 0) on the IV implied by that same close (mid when
+                                             //   quotes exist); time = calendar days to expiry + the rest of the session
   | { by: 'leg'; leg: string; steps: number }; // relative to another leg's chosen strike, + = higher strike
 
 // Per-leg level: 'pct' of the leg's entry price, or 'points' of premium.
@@ -76,13 +82,14 @@ interface EntryRule {
   weekdays: number[];                        // 0 = Monday … 4 = Friday
   dte?: { min?: number; max?: number };      // calendar days from trade date to the nearest leg's expiry
   conditions: Condition[];                   // all must pass
-  frequency: 'daily' | 'when_flat';          // 'when_flat': no new position while one is held (multi-day holds)
 }
+// One position at a time: while a position is open (including one carried overnight) no new entry is made.
 
 type Condition =
   | { kind: 'or_inside'; or_minutes: number; candle_minutes: number; mode: 'full' | 'body' | 'close' | 'overlap' }
       // the last completed candle before entry must sit inside the opening range (the straddle's filter)
-  | { kind: 'or_width_pct'; min?: number; max?: number }   // opening-range width as % of spot
+  | { kind: 'or_width_pct'; min?: number; max?: number; or_minutes?: number }   // opening-range width as % of spot;
+      // refused unless the entry is at or after the end of the range (no look-ahead)
   | { kind: 'gap_pct'; min?: number; max?: number }        // today's first bar open vs previous session close
   | { kind: 'move_pct'; min?: number; max?: number }       // spot at decision vs today's open
   | { kind: 'net_premium'; min?: number; max?: number };   // entry credit (+) / debit (−) in points per unit ratio
@@ -133,7 +140,8 @@ defaults (`web/lib/legs/templates.ts`). A template never adds behaviour the spec
 
 ### Gating (what the data can and cannot support)
 
-`validateSpec(spec, caps): { ok: boolean; errors: Gate[]; warnings: Gate[] }`. An error blocks the run with
+`StraddloopLegs.validate(spec, caps): { ok: boolean; errors: Gate[]; warnings: Gate[]; spec }` (caps from
+`StraddloopLegs.capsOf(sessions)`). An error blocks the run with
 its message; a warning runs and is printed on the report. Nothing is faked to get around a gate.
 
 ```ts
@@ -147,6 +155,7 @@ interface DatasetCaps {
   bid_ask: boolean;                          // false for Dhan; true for the synthetic model
   continuous: boolean;                       // consecutive sessions share contracts (true for real data;
                                              // false for the per-day synthetic model)
+  expiry_assumed: boolean;                   // a day file's expiry came from the weekday rule, not the exchange
 }
 interface Gate { code: GateCode; message: string; leg?: string }
 ```
@@ -161,7 +170,12 @@ interface Gate { code: GateCode; message: string; leg?: string }
 | `HOLD_NEEDS_CONTINUOUS` | error | `hold` ≠ intraday on a dataset whose sessions are independent (synthetic) |
 | `MIXED_EXPIRY_SETTLEMENT` | warning | legs with different expiries and `settle_at_expiry`: the near leg settles, the far leg is sold at its last bar |
 | `NO_BID_ASK` | warning | always on real data: fills are candle price ± slippage |
+| `EXPIRY_ASSUMED` | warning | a multi-day hold on day files whose expiry date is assumed (weekday rule, holidays not applied) |
+| `DATA_GAP` | warning (run time) | a held position crossed weekdays with no stored data, or a carried leg had no prices and was closed at its last seen price (never settled or invented) |
 | `INVALID_SPEC` | error | structural problems (no legs, bad ratio, unknown leg reference, bad time) |
+
+`legs.run` throws an `Error` whose `gates` lists the errors and warnings when any error applies; the worker
+passes them on as `{ id, ok: false, error, gates }`, so the page can list every reason at once.
 
 ---
 
@@ -175,7 +189,7 @@ The worker message keeps its existing shape. The leg engine is `params.strategy 
 { id, params: { strategy: 'legs', spec: StrategySpec, ...AccountParams }, days?: DayRef[], range?: DateRange }
 // worker -> main thread
 { id, progress: { phase: 'decode' | 'simulate' | 'ledger'; done: number; total: number } }   // (planned)
-{ id, ok: true, result: RunResult, ms } | { id, ok: false, error }
+{ id, ok: true, result: RunResult, ms } | { id, ok: false, error, gates: Gate[] | null }
 ```
 
 `RunResult` (in `web/lib/types.ts`) gains, for every strategy:
@@ -193,7 +207,7 @@ interface DayOutcome {
   date: string;
   status: 'traded' | 'holding' | 'no_entry' | 'filtered' | 'excluded' | 'rejected';
   reason: string | null;                     // why it did not trade, in words ('entry condition full failed', 'opening range incomplete: index bar 09:31 missing')
-  opened: number; closed: number;            // positions opened / closed that day
+  opened: number; closed: number;            // legs opened / closed that day (fills; an intraday straddle = 2 / 2)
   net: number;                               // that day's net realised P&L from the ledger
 }
 ```
@@ -208,13 +222,17 @@ runnable days in the `DateRange`, and every runnable day has exactly one outcome
 interface PositionRecord {
   id: string;                                // 'P1', 'P2', …
   opened: { date: string; t: number }; closed: { date: string; t: number } | null;
-  legs: { id: string; leg: string; action: Action; right: Right; strike: number; expiry: string; qty: number;
-          entry_px: number; exit_px: number | null; exit_reason: string | null }[];
+  legs: { id: string; leg: string; kind: 'initial' | 'reentry'; action: Action; right: Right; strike: number;
+          expiry: string; qty: number; entry_date: string; entry_t: number; entry_px: number;
+          exit_date: string | null; exit_t: number | null; exit_px: number | null; exit_reason: string | null;
+          gross: number; charges: number; net: number }[];   // leg ids are 'P1.L1', a re-entry 'P1.L1.r1'
   entry_premium: number;                     // net points per position (credit +, debit −), ratio-weighted
   exit_reason: string;                       // 'target' | 'stop' | 'leg_stop' | 'time' | 'expiry' | 'range_end' | …
   gross: number; charges: number; net: number;
   payoff: { max_profit: number | null; max_loss: number | null; breakevens: number[] } | null;
-                                             // at expiry, single-expiry positions only; null = unbounded or mixed expiry
+                                             // at expiry, initial legs, single-expiry positions only (null = mixed
+                                             // expiry); max_profit / max_loss null = unbounded
+  flags: string[];
 }
 ```
 
@@ -239,7 +257,9 @@ interface DayResult {
 interface EngineFill {
   t: number; leg: string | number;           // leg ids must be unique across the run when carried
   action: Action; side: Right; strike: number; expiry: string; qty: number; px: number;
-  reason: string;                            // 'entry' | 're-entry' | 'stop' | 'target' | 'time' | 'expiry_settlement' | …
+  reason: string;                            // 'entry' | 're-entry' | 'leg_stop' | 'leg_target' | 'stop' | 'target' |
+                                             // 'time' | 'expiry_day_exit' | 'range_end' | 'data_end' | 'data_gap' |
+                                             // 'expired_unobserved' | 'expiry' (settlement)
   intrabar: boolean; kind?: string;
   settlement?: boolean;                      // NEW: cash settlement at intrinsic value; charged by settlement rules
   costs: Charges | null;                     // the engine's own cost line; reconciled against the ledger's
@@ -247,8 +267,9 @@ interface EngineFill {
 ```
 
 Ledger outputs (unchanged names; new fields marked): `fills` (one row per fill, `FILL_COLS`), `tradebook`
-(one row per closed leg, `TRADEBOOK_COLS`, + `position_id` NEW), `daily` (one row per session, `DAILY_COLS`,
-+ `open_legs`, `unrealised_end`, `closing_equity` NEW), `rejections`, `liquidations`, `report`.
+(one row per closed leg, `TRADEBOOK_COLS`, + `position_id`, `exit_date` NEW), `daily` (one row per session,
+`DAILY_COLS`, + `open_legs`, `unrealised_end`, `closing_equity` NEW; `unrealised_start` on the row object),
+`rejections`, `liquidations`, `report`.
 
 Accounting rules (`docs/ACCOUNTING.md` is the full text): balance = capital + cumulative net realised;
 equity = balance + unrealised at candle-close marks; available = balance − margin blocked − long premium
@@ -258,18 +279,25 @@ P&L; drawdown, Sharpe and Sortino use closing equity (identical to closing balan
 strategies, so existing results do not change). The engine closes every position by the end of the
 range, so the report never ends with an open position.
 
-Settlement fills: price = intrinsic value against the index close on expiry day; no brokerage or
-exchange charge; STT `exercise_stt_pct` on intrinsic × qty for a long ITM leg; OTM legs settle at 0 with no
-charge. These rates are UNVERIFIED and flagged on the report.
+Settlement fills: price = intrinsic value against the index close of the last stored bar of expiry day
+(an earlier bar if that one is missing, flagged `settled_on_earlier_bar`); no brokerage or exchange charge;
+STT `exercise_stt_pct` on intrinsic × qty for a long ITM leg; OTM legs settle at 0 with no charge. These
+rates are UNVERIFIED and flagged on the report. Settlement is simultaneous; shorts are booked first so the
+margin never sees a hedge removed before the leg it covers (the same order as every exit).
 
 Margin (`account.margin_model`, NEW): `per_leg` (today's model: (SPAN-like % + exposure %) × strike × qty
-per short leg, no offsets) or `hedged` (per expiry group: the worst loss at expiry over a grid of index
-levels, capped at the `per_leg` figure; long premium is held as cash, not margin). Both are ESTIMATED.
+per short leg, no offsets) or `hedged` (the worst loss at intrinsic value of all open legs over index
+levels within ± `margin_span_pct` % of the entry spot, plus `margin_exposure_pct` % × that spot × short qty,
+capped at the `per_leg` figure; long premium is held as cash, not margin; legs of different expiries are
+valued on the same level, an approximation). Both are ESTIMATED, not SPAN. The Lab's leg engine defaults
+to `hedged`; the straddle and ORB keep `per_leg`, so their results do not change.
 
 Reconciliation identities in `report.reconciliation` must all pass for any figure to be shown as final:
 balance = capital + Σ tradebook net = capital + Σ daily net = capital + Σ per-fill (realised − charges);
-charge components add up; every opening fill is closed; ledger charges = engine cost lines; NEW: Σ position
-net = Σ tradebook net; closing equity of the last day = ending balance.
+charge components add up; every opening fill is closed; ledger charges = engine cost lines; NEW: unrealised
+at the end = 0; closing equity of the last day = ending balance; and, for the leg engine when the ledger
+executed every order as sent (no rejection, partial or liquidation), each position's engine net = its
+ledger net (one check per position).
 
 ---
 
@@ -280,14 +308,15 @@ spec ──validate──▶ gated? ─yes─▶ run refused, Gate.message shown
    │no
 day ─▶ conditions/filters ─fail─▶ DayOutcome no_entry / filtered / excluded
    │pass
-strikes selected (StrikeRule) ─missing price─▶ excluded ('strike not in stored window')
+strikes selected (StrikeRule) ─missing strike or entry price─▶ excluded (no partial entry: all legs or none)
    │
 orders at next bar open ─ledger─▶ rejected (margin) | partial | executed
    │
 OPEN: marked at every bar close; per-leg stop/target; position stop/target; adjustments
    │
-CLOSED by one of: leg_stop, leg_target, stop, target, time, expiry (settled), range_end,
-                  data_end (no further price), forced_liquidation (ledger), unwind (an entry leg failed to fill)
+CLOSED by one of: leg_stop, leg_target, stop, target, time, expiry_day_exit, expiry (settled), range_end,
+                  data_end (no further price that day), data_gap / expired_unobserved (a carried leg with no
+                  prices: closed at its last seen price, flagged), forced liquidation (ledger)
 ```
 
 One position = the legs opened together at one entry; each leg is one tradebook row with `position_id`.
@@ -363,4 +392,4 @@ file quality is `complete`). No new database objects are needed; `market_day_sta
 | Bid/ask | no: fills are candle ± slippage, flagged optimistic |
 | Greeks / delta strikes | no on real data; yes on the synthetic model (its vol is known) |
 | Other underlyings | no stored data |
-| Multi-day holds and expiry settlement | real data yes (contracts continue across stored days); synthetic no |
+| Multi-day holds and expiry settlement | real data yes (contracts continue across stored days); synthetic no. Expiry dates in today's day files are assumed (weekday rule): a holiday-shifted expiry (for example around Diwali) would be settled on the wrong day until bhavcopy expiries are imported, so such runs carry `EXPIRY_ASSUMED` |
