@@ -215,11 +215,18 @@ export function LabClient() {
                   <>
                     <div className="dates">
                       <label className="field"><span className="flabel small">From</span>
-                        <input className="input input--sm" type="date" min={span.min} max={span.max} value={range.from} onChange={(e) => setRange((x) => ({ ...x, from: e.target.value }))} /></label>
+                        <input className="input input--sm" type="date" value={range.from} onChange={(e) => setRange((x) => ({ ...x, from: e.target.value }))} /></label>
                       <label className="field"><span className="flabel small">To</span>
-                        <input className="input input--sm" type="date" min={span.min} max={span.max} value={range.to} onChange={(e) => setRange((x) => ({ ...x, to: e.target.value }))} /></label>
+                        <input className="input input--sm" type="date" value={range.to} onChange={(e) => setRange((x) => ({ ...x, to: e.target.value }))} /></label>
                     </div>
                     <p className="help">{chosen.length} trading day{chosen.length === 1 ? '' : 's'} selected · stored {shortDate(span.min)} to {shortDate(span.max)}{local ? ' · from files on this computer' : ''}</p>
+                    {!local && range.from && range.to && (range.from < span.min || range.to > span.max) && (
+                      <div className="small stack" style={{ ['--gap' as string]: '6px' }}>
+                        <p>Some of these dates are not stored yet. Run this on your computer, then come back and rerun:</p>
+                        <code className="cmd">{`straddloop load --expiry ${flag} --start ${range.from} --end ${range.to}`}</code>
+                        <button type="button" className="link" onClick={() => navigator.clipboard?.writeText(`straddloop load --expiry ${flag} --start ${range.from} --end ${range.to}`).catch(() => undefined)}>Copy the command</button>
+                      </div>
+                    )}
                     <label className="field">
                       <span className="flabel small" style={{ display: 'flex', justifyContent: 'space-between' }}><span>Lot size</span><span className="muted">{Number(params.lot_size) > 0 ? 'set by you' : `assumed ${fileLot ?? ''}`}</span></span>
                       <input className="input input--sm" type="number" min={0} step={1} placeholder={`Use the stored size${fileLot ? ` (${fileLot})` : ''}`}

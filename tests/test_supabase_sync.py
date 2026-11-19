@@ -48,3 +48,24 @@ def test_errors_never_contain_the_key():
 def test_missing_settings_are_explained():
     with pytest.raises(SupabaseError, match="SUPABASE_URL"):
         SupabaseSync("", "")
+
+
+def test_load_pulls_then_uploads_with_an_inclusive_end(monkeypatch, tmp_path):
+    import argparse
+    from types import SimpleNamespace
+
+    from straddloop.data import pull, upload_cli
+
+    order = []
+    monkeypatch.setattr(pull, "pull_underlying", lambda prov, store, und, s, e, i: order.append(("index", s, e)))
+    monkeypatch.setattr(pull, "pull_options", lambda *a, **k: (order.append(("options", a[3], a[4], a[6]))
+                        or SimpleNamespace(days_fetched=[1], days_skipped=[], holidays=[])))
+    monkeypatch.setattr(upload_cli, "cmd_supabase_upload", lambda args, settings: order.append("upload") or 0)
+    settings = SimpleNamespace(has_dhan_credentials=True, dhan_client_id="1", dhan_access_token="t",
+                               raw_dir=tmp_path, store_dir=tmp_path, dhan_requests_per_second=0)
+    args = argparse.Namespace(underlying="NIFTY", expiry="WEEK", start="2025-10-06", end="2025-10-17", window=10)
+    assert upload_cli.cmd_load(args, settings) == 0
+    assert order == [("index", date(2025, 10, 6), date(2025, 10, 18)),
+                     ("options", date(2025, 10, 6), date(2025, 10, 18), "WEEK"), "upload"]
+    settings.has_dhan_credentials = False
+    assert upload_cli.cmd_load(args, settings) == 1

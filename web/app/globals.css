@@ -438,3 +438,4 @@ select.input--sm { width: auto; max-width: 100%; }
 .ptable.legs thead th { font-family: var(--font-mono); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; }
 .events { margin: 0; padding: 0 0 0 1.2em; display: grid; gap: 4px; max-height: 220px; overflow: auto; }
 .events .mono { margin-right: 6px; }
+.cmd { display: block; padding: 8px 10px; border: 1.5px solid var(--ink); border-radius: var(--radius); background: var(--card); font-family: var(--font-mono); font-size: 0.78rem; overflow-wrap: anywhere; }
