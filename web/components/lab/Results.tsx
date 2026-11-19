@@ -26,7 +26,7 @@ export type LabApi = {
   replay: (date: string) => Promise<import('@/lib/types').Replay | null>;
 };
 export type Baseline = { label: string; dataKey: string; strategy: string; m: Record<string, number | null> };
-export type TabId = 'overview' | 'capital' | 'charts' | 'trades' | 'sessions' | 'replay' | 'diagnostics' | 'ledger';
+export type TabId = 'overview' | 'capital' | 'charts' | 'trades' | 'sessions' | 'replay' | 'research' | 'diagnostics' | 'ledger';
 
 const tone = (v: number | null | undefined) => (v == null ? '' : v > 0 ? 'gain' : v < 0 ? 'loss' : '');
 const n = (v: unknown) => (typeof v === 'number' && isFinite(v) ? v : null);
@@ -342,7 +342,7 @@ function SessionsPanel({ r, range, onReplay }: { r: RunResult; range: DateRange 
   );
 }
 
-function DiagnosticsPanel({ r, range, real }: { r: RunResult; range: DateRange | null; real: boolean }) {
+function DiagnosticsPanel({ r, range, real, go }: { r: RunResult; range: DateRange | null; real: boolean; go: (t: TabId) => void }) {
   const rep = r.account?.report;
   const checks: { l: 'ok' | 'warn' | 'info'; t: string }[] = [];
   if (real && r.data) {
@@ -366,13 +366,13 @@ function DiagnosticsPanel({ r, range, real }: { r: RunResult; range: DateRange |
     checks.push(rep.reconciliation.ok ? { l: 'ok', t: `All ${rep.reconciliation.checks.length} reconciliation identities hold: balance, tradebook, ledger and daily totals agree.` } : { l: 'warn', t: 'Reconciliation FAILED: do not rely on these figures. See the Ledger tab.' });
   }
   if (r.traded < 30 && !rep) checks.push({ l: 'warn', t: `${r.traded} traded ${r.unit === 'day' ? 'days' : r.unit + 's'}: too few for stable ratios.` });
-  const slots: [string, string][] = [
-    ['Regime analysis', 'Results split by volatility and trend regime, with win rate, P&L and drawdown per regime.'],
-    ['Parameter sensitivity', 'How the result moves when each setting moves; plateaus versus single peaks.'],
-    ['Optimisation comparison', 'The best tested configuration against the one shown here, never applied automatically.'],
-    ['Out-of-sample results', 'Train, validate and test periods, and walk-forward windows.'],
-    ['Monte Carlo', 'Reshuffled trade sequences: the spread of drawdowns and outcomes the same trades could produce.'],
-    ['Robustness score', 'A transparent score from its parts: sample size, out-of-sample result, stability, costs and data quality.'],
+  const slots: [string, string, string][] = [
+    ['Regime analysis', 'With this run', 'Results split by volatility and trend regime, with win rate, P&L and drawdown per regime.'],
+    ['Robustness score', 'With this run', 'A transparent score from its parts: sample size, out-of-sample result, stability, costs and data quality.'],
+    ['Monte Carlo', 'With this run', 'Reshuffled trade sequences: the spread of drawdowns and outcomes the same trades could produce.'],
+    ['Parameter sensitivity', 'On request', 'The robustness check reruns the settings one step either side of each value: plateaus versus single peaks.'],
+    ['Optimisation comparison', 'On request', 'The best tested configuration against the one shown here. It is never applied unless you press Load.'],
+    ['Out-of-sample results', 'On request', 'Train, validate and test periods, and walk-forward windows, from an optimisation study.'],
   ];
   return (
     <div className="panel" role="tabpanel" id="panel-diagnostics" aria-labelledby="tab-diagnostics">
@@ -381,9 +381,9 @@ function DiagnosticsPanel({ r, range, real }: { r: RunResult; range: DateRange |
         <ul className="dq">{checks.map((c) => <li key={c.t} data-l={c.l}>{c.t}</li>)}</ul>
       </div>
       <div className="blk">
-        <div className="blk-h"><h2>Strategy diagnostics</h2><span className="lbl">not built yet</span></div>
-        <p className="chart-cap">These come from the analytics module, which is being built separately. Nothing is shown until it produces real figures for this run.</p>
-        <div className="slots">{slots.map(([h, p]) => <div className="slot" key={h}><span className="state">Pending</span><h3>{h}</h3><p>{p}</p></div>)}</div>
+        <div className="blk-h"><h2>Strategy diagnostics</h2><button type="button" className="qbtn" onClick={() => go('research')}>Open Research</button></div>
+        <p className="chart-cap">Computed in the Research tab from this run’s ledger, for the straddle and the opening range breakout. “On request” items run only when you press the button there, and none of them changes your settings.</p>
+        <div className="slots">{slots.map(([h, st, p]) => <div className="slot" key={h}><span className="state">{st}</span><h3>{h}</h3><p>{p}</p></div>)}</div>
       </div>
     </div>
   );
@@ -436,12 +436,16 @@ function LedgerPanel({ r, lab, stamp }: { r: RunResult; lab: LabApi; stamp: stri
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'overview', label: 'Overview' }, { id: 'capital', label: 'Capital & margin' }, { id: 'charts', label: 'Charts' }, { id: 'trades', label: 'Trades' },
-  { id: 'sessions', label: 'Sessions' }, { id: 'replay', label: 'Replay' }, { id: 'diagnostics', label: 'Diagnostics' }, { id: 'ledger', label: 'Ledger & export' },
+  { id: 'sessions', label: 'Sessions' }, { id: 'replay', label: 'Replay' }, { id: 'research', label: 'Research' }, { id: 'diagnostics', label: 'Diagnostics' }, { id: 'ledger', label: 'Ledger & export' },
 ];
 
-export function ResultTabs({ r, lab, range, real, slip, tab, setTab }: {
+export function ResultTabs({ r, lab, range, real, slip, tab, setTab, research }: {
   r: RunResult; lab: LabApi; range: DateRange | null; real: boolean; slip: number | undefined; tab: TabId; setTab: (t: TabId) => void;
+  /** The research panel. It mounts the first time its tab opens and then stays mounted, so a running study survives a tab change. */
+  research?: React.ReactNode;
 }) {
+  const [researchSeen, setResearchSeen] = useState(false);
+  useEffect(() => { if (tab === 'research') setResearchSeen(true); }, [tab]);
   const rev = r.account ? `${r.account.report.generated.run_hash}` : `${r.strategy}-${r.net}-${r.curve.length}`;
   const [trades, setTrades] = useState<LedgerRow[] | null>(null);
   const [fills, setFills] = useState<LedgerRow[]>([]);
@@ -456,7 +460,7 @@ export function ResultTabs({ r, lab, range, real, slip, tab, setTab }: {
     return () => { live = false; };
   }, [rev, inspect, r.account]);
   const replayable = r.strategy !== 'fourleg' && r.curve.length > 0;
-  const tabs = TABS.filter((t) => t.id !== 'replay' || replayable);
+  const tabs = TABS.filter((t) => (t.id !== 'replay' || replayable) && (t.id !== 'research' || !!research));
   if (!tabs.some((t) => t.id === tab)) tab = 'overview';
   const counts: Partial<Record<TabId, number>> = { trades: trades?.length, sessions: r.days?.length };
   const m = r.account?.report.margin;
@@ -508,7 +512,10 @@ export function ResultTabs({ r, lab, range, real, slip, tab, setTab }: {
           <ReplayPanel key={`${rev}-${replayDate ?? ''}`} r={r} load={lab.replay} initialDate={replayDate} bare />
         </div>
       )}
-      {tab === 'diagnostics' && <DiagnosticsPanel r={r} range={range} real={real} />}
+      {research != null && (researchSeen || tab === 'research') && (
+        <div className="panel" role="tabpanel" id="panel-research" aria-labelledby="tab-research" hidden={tab !== 'research'}>{research}</div>
+      )}
+      {tab === 'diagnostics' && <DiagnosticsPanel r={r} range={range} real={real} go={go} />}
       {tab === 'ledger' && <LedgerPanel r={r} lab={lab} stamp={stamp} />}
     </>
   );

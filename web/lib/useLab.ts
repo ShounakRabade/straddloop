@@ -1,6 +1,7 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ExportKind, LedgerRow, Params, Replay, RunResult } from './types';
+import type { Research, ResearchProgress, ResearchRequest } from './research';
 
 type State = { status: 'idle' | 'running' | 'done' | 'error'; result: RunResult | null; error: string | null; ms: number };
 export type Page = { kind: string; total: number; offset: number; rows: LedgerRow[] };
@@ -11,7 +12,8 @@ export type DayRef = { path: string; buf?: ArrayBuffer };
 export function useLab() {
   const worker = useRef<Worker | null>(null);
   const latest = useRef(0);
-  const waiting = useRef(new Map<number, (r: { ok: boolean; replay?: Replay | null; csv?: string | null; page?: Page | null; error?: string }) => void>());
+  const waiting = useRef(new Map<number, (r: { ok: boolean; replay?: Replay | null; csv?: string | null; page?: Page | null; research?: Research; error?: string }) => void>());
+  const progressFor = useRef(new Map<number, (p: ResearchProgress) => void>());
   const replays = useRef(0);
   const [state, setState] = useState<State>({ status: 'idle', result: null, error: null, ms: 0 });
 
@@ -20,6 +22,7 @@ export function useLab() {
     worker.current = w;
     w.onmessage = (ev: MessageEvent) => {
       const { id, ok, result, error, ms } = ev.data;
+      if (ev.data.progress) { progressFor.current.get(id)?.(ev.data.progress); return; }
       const cb = waiting.current.get(id);
       if (cb) { waiting.current.delete(id); cb(ev.data); return; }
       if (id !== latest.current) return;
@@ -50,5 +53,18 @@ export function useLab() {
 
   const fail = useCallback((error: string) => setState({ status: 'error', result: null, error, ms: 0 }), []);
 
-  return { ...state, run, replay, exportCsv, inspect, fail };
+  /** Research on the latest run (regimes, robustness check, optimisation study). Resolves with the analysis or
+   *  an error message; onProgress gets { done, total, stage } while a study runs. `cancel` stops it between runs. */
+  const research = useCallback((req: ResearchRequest, onProgress?: (p: ResearchProgress) => void) => {
+    replays.current += 1;
+    const id = -replays.current;
+    if (onProgress) progressFor.current.set(id, onProgress);
+    const done = new Promise<{ ok: true; research: Research } | { ok: false; error: string }>((resolve) => {
+      waiting.current.set(id, (d) => { progressFor.current.delete(id); resolve(d.ok && d.research ? { ok: true, research: d.research } : { ok: false, error: d.error ?? 'Research stopped.' }); });
+    });
+    worker.current?.postMessage({ id, research: req });
+    return { done, cancel: () => worker.current?.postMessage({ cancelResearch: id }) };
+  }, []);
+
+  return { ...state, run, replay, exportCsv, inspect, fail, research };
 }

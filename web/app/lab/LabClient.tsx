@@ -12,20 +12,22 @@ import { useSession } from '@/lib/useSession';
 import { cloudEnabled } from '@/lib/supabase';
 import { saveRun } from '@/lib/store';
 import { availability, download, readLocal, statuses, type Availability, type ExpiryFlag } from '@/lib/marketData';
-import { buildDateRange, presetRange, type InventoryDay, type StatusRow } from '@/lib/dateRange';
+import { boundsOf, buildDateRange, presetRange, type InventoryDay, type StatusRow } from '@/lib/dateRange';
+import { ENGINE_ONLY_KEYS, PARAM_SPACE, choiceLabel } from '@/lib/researchSpace';
 import { ENTRY, EXIT_TEXT, LEGS, SECTIONS, STRATEGY_GROUP, sectionOf, type SectionId } from '@/lib/labSections';
 import { GLOSSARY } from '@/lib/glossary';
 import { inr, shortDate } from '@/lib/format';
 import type { Params, StrategySlug } from '@/lib/types';
 import { Icon, ParamField, Section, Tip } from '@/components/lab/kit';
 import { Calendar } from '@/components/lab/Calendar';
+import { ResearchPanel } from '@/components/research/ResearchPanel';
 import { Exec, ResultTabs, headline, type Baseline, type TabId } from '@/components/lab/Results';
 
 const OPEN_KEY = 'straddloop.open';
 const SOURCE_KEY = 'straddloop.source';
 const RAIL_KEY = 'straddloop.rail';
 const AUTO_KEY = 'straddloop.autorun';
-const TAB_IDS: TabId[] = ['overview', 'capital', 'charts', 'trades', 'sessions', 'replay', 'diagnostics', 'ledger'];
+const TAB_IDS: TabId[] = ['overview', 'capital', 'charts', 'trades', 'sessions', 'replay', 'research', 'diagnostics', 'ledger'];
 const NO_STATUS: StatusRow[] = [];
 type Source = 'synthetic' | 'real';
 type LocalDay = { path: string; date: string; buf?: ArrayBuffer };
@@ -72,6 +74,7 @@ export function LabClient() {
   const [saveOpen, setSaveOpen] = useState(false);
   const [note, setNote] = useState('');
   const [saved, setSaved] = useState<{ state: 'idle' | 'saving' | 'done' | 'error'; msg?: string }>({ state: 'idle' });
+  const [beforeLoad, setBeforeLoad] = useState<Params | null>(null);  // the person's settings before they loaded a study's selection
   const lab = useLab();
   const { session, ready: sessionReady } = useSession();
   const strategy = bySlug(slug)!;
@@ -141,6 +144,10 @@ export function LabClient() {
   const fields = useMemo(() => (real ? strategy.fields.filter((f) => !SYNTHETIC_KEYS.includes(f.key)) : strategy.fields), [real, strategy]);
   const changed = useMemo(() => describeParams({ ...strategy, fields }, params), [strategy, fields, params]);
   const lotSet = Number(params.lot_size) > 0;
+  // Engine settings that have no field in the rail (set only by loading an optimisation study). Always listed, never silent.
+  const engineSet = ENGINE_ONLY_KEYS.filter((k) => params[k] !== undefined);
+  const spaceLabel = (k: string) => [...PARAM_SPACE.straddle, ...PARAM_SPACE.orb].find((x) => x.key === k)?.label ?? k;
+  const nChanged = changed.length + (lotSet ? 1 : 0) + engineSet.length;
   const realReady = !!range && range.runnable.length > 0;
   const canRun = booted && (real ? realReady : true);
 
@@ -151,8 +158,9 @@ export function LabClient() {
   const configKey = useMemo(() => JSON.stringify([slug, real ? 'real' : 'syn', runParams]), [slug, real, runParams]);
   const dataKey = real ? `real:${flag}:${range?.key ?? ''}` : slug === 'fourleg' ? `syn:${params.months}` : `syn:${params.days}:${params.seed}:${params.iv}`;
   const isDefault = useMemo(
-    () => strategy.fields.filter((f) => !SYNTHETIC_KEYS.includes(f.key) && f.key !== 'months').every((f) => params[f.key] === strategy.defaults[f.key]) && !lotSet,
-    [strategy, params, lotSet]);
+    () => strategy.fields.filter((f) => !SYNTHETIC_KEYS.includes(f.key) && f.key !== 'months').every((f) => params[f.key] === strategy.defaults[f.key]) && !lotSet && !engineSet.length,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [strategy, params, lotSet, engineSet.length]);
 
   const runNow = useCallback(async () => {
     if (!canRun || loading) return;
@@ -244,7 +252,10 @@ export function LabClient() {
     setRail((x) => { const n = x === 'open' ? 'collapsed' : 'open'; try { localStorage.setItem(RAIL_KEY, n); } catch { /* ignore */ } return n; });
   };
   const setAuto = (v: boolean) => setAutoPref((p) => { const n = { ...p, [real ? 'real' : 'synthetic']: v }; try { localStorage.setItem(AUTO_KEY, JSON.stringify(n)); } catch { /* ignore */ } return n; });
-  const pick = (next: StrategySlug) => { setSlug(next); setParams(bySlug(next)!.defaults); setNote(''); setSaveOpen(false); };
+  const pick = (next: StrategySlug) => { setSlug(next); setParams(bySlug(next)!.defaults); setNote(''); setSaveOpen(false); setBeforeLoad(null); };
+  const resetAll = () => { setParams(strategy.defaults); setBeforeLoad(null); };
+  /** Only ever called by the person pressing "Load" in the optimisation lab. */
+  const loadFromStudy = (changes: Record<string, unknown>) => { setBeforeLoad(params); setParams((p) => ({ ...p, ...(changes as Params) })); };
   const pickSource = (s: Source) => { setSource(s); try { localStorage.setItem(SOURCE_KEY, s); } catch { /* ignore */ } };
   const set = (k: string, v: string | number | boolean) => setParams((p) => ({ ...p, [k]: v }));
 
@@ -300,6 +311,12 @@ export function LabClient() {
     advanced: inSec('advanced').length ? (changedIn('advanced') ? `${changedIn('advanced')} changed` : 'Published defaults') : 'None for this strategy',
   };
 
+  const researchMeta = useMemo(() => ({ oneLine: strategy.oneLine, changed: [...changed, ...engineSet.map((k) => `${spaceLabel(k)}: ${choiceLabel(params[k])}`)] }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [strategy, changed, params]);
+  const stored = useMemo(() => (real && inventory.length ? boundsOf(inventory, statusRows) : null), [real, inventory, statusRows]);
+  const dataNote = real && r?.data && stored?.earliest && stored.latest_any ? `Stored real data runs from ${stored.earliest} to ${stored.latest_any}; this run used ${r.data.days} of those sessions.` : null;
+
   const checks: { ok: 'true' | 'false' | 'warn'; t: React.ReactNode }[] = [];
   if (!real) checks.push({ ok: 'true', t: slug === 'fourleg' ? `Synthetic model · ${params.months} months, four stocks` : `Synthetic model · ${params.days} sessions, seed ${params.seed}` });
   else if (!local && !avail) checks.push({ ok: 'warn', t: 'Checking which days are stored…' });
@@ -350,13 +367,13 @@ export function LabClient() {
         <div className="rail-head">
           <span className="lbl">Configuration</span>
           {guide == null && <button type="button" className="qbtn" onClick={() => goGuide(0)}>Guide me</button>}
-          <button type="button" className="qbtn" onClick={() => setParams(strategy.defaults)} disabled={!changed.length && !lotSet}>Reset</button>
+          <button type="button" className="qbtn" onClick={resetAll} disabled={!nChanged}>Reset</button>
           <button ref={railHead} type="button" className="ib" onClick={() => { if (drawer) { setDrawer(false); toggleBtn.current?.focus(); } else toggleRail(); }}
             aria-label={drawer ? 'Close settings' : rail === 'open' ? 'Collapse settings' : 'Expand settings'}>
             {drawer ? <Icon.close /> : rail === 'open' ? <Icon.left /> : <Icon.right />}
           </button>
         </div>
-        <button type="button" className="rail-spine" onClick={toggleRail}>Settings{changed.length ? ` · ${changed.length} changed` : ''}</button>
+        <button type="button" className="rail-spine" onClick={toggleRail}>Settings{nChanged ? ` · ${nChanged} changed` : ''}</button>
 
         <div className="rail-body">
           {g && (
@@ -490,6 +507,14 @@ export function LabClient() {
           <Section id="advanced" letter="F" title="Advanced" summary={sectionSummary.advanced} open={open.has('advanced')} onToggle={() => toggleSec('advanced')} changed={changedIn('advanced')} dim={dim('advanced')}>
             {inSec('advanced').length ? inSec('advanced').map((f) => field(f)) : <p className="sec-note">This strategy has no advanced settings.</p>}
           </Section>
+
+          {(engineSet.length > 0 || beforeLoad) && (
+            <div className="rail-note" role="status">
+              {engineSet.length > 0 && <p><b>Also set, with no field above:</b> {engineSet.map((k) => `${spaceLabel(k)} ${choiceLabel(params[k])}`).join(' · ')}.{' '}
+                <button type="button" className="qlink" onClick={() => setParams((p) => { const q = { ...p }; engineSet.forEach((k) => delete q[k]); return q; })}>Clear these</button></p>}
+              {beforeLoad && <p>Loaded from the optimisation lab.{' '}<button type="button" className="qlink" onClick={() => { setParams(beforeLoad); setBeforeLoad(null); }}>Put my settings back</button></p>}
+            </div>
+          )}
         </div>
 
         <div className="rail-foot">
@@ -499,7 +524,7 @@ export function LabClient() {
           {runButton()}
           <div className="rail-auto">
             <label><input type="checkbox" checked={autoOn} onChange={(e) => setAuto(e.target.checked)} />Re-run on every change</label>
-            <span>{changed.length + (lotSet ? 1 : 0) ? `${changed.length + (lotSet ? 1 : 0)} changed` : 'defaults'}</span>
+            <span>{nChanged ? `${nChanged} changed` : 'defaults'}</span>
           </div>
         </div>
       </aside>
@@ -530,7 +555,7 @@ export function LabClient() {
               <h2>The simulation stopped</h2>
               <p className="sec-err">{lab.error}</p>
               <p>{/cost schedule/i.test(lab.error ?? '') ? 'Costs are charged at the rates in force on each trade date, and the table starts on 1 Jul 2020. Choose a later start date.' : 'Nothing below is from this run. Reset the settings and run again.'}</p>
-              <div className="run-actions"><button type="button" className="qbtn" onClick={() => setParams(strategy.defaults)}>Reset to defaults</button>{runButton('run-btn--inline')}</div>
+              <div className="run-actions"><button type="button" className="qbtn" onClick={resetAll}>Reset to defaults</button>{runButton('run-btn--inline')}</div>
             </div>
           ) : real && !realReady && !r ? (
             <div className="ws-empty">
@@ -562,7 +587,7 @@ export function LabClient() {
                   <h1>{strategy.name}</h1>
                   <div className="run-ctx">
                     <span>{r.data ? <>Real NIFTY {seriesName} · <b>{shortDate(r.data.from)} – {shortDate(r.data.to)}</b> · {r.data.days} sessions</> : slug === 'fourleg' ? <>Synthetic · <b>{params.months} months</b></> : <>Synthetic · <b>{r.sessions} sessions</b> · seed {String(params.seed)}</>}</span>
-                    <span>{changed.length + (lotSet ? 1 : 0) ? `${changed.length + (lotSet ? 1 : 0)} changed from defaults` : 'Default rules'}</span>
+                    <span>{nChanged ? `${nChanged} changed from defaults` : 'Default rules'}</span>
                     {cmp && <span>Compared with <b>{cmp.label}</b> · <button type="button" className="qlink" onClick={() => setBaseline(null)}>clear</button></span>}
                     {r.account?.report.generated.run_hash && <span title="Run fingerprint: the same settings and data give the same hash">Run {r.account.report.generated.run_hash.slice(0, 8)}</span>}
                   </div>
@@ -591,7 +616,8 @@ export function LabClient() {
                 </div>
               )}
               <Exec r={r} busy={busy || stale} baseline={cmp} />
-              <ResultTabs r={r} lab={lab} range={range} real={real} slip={Number(params.slip_pct ?? NaN)} tab={tab} setTab={setTab} />
+              <ResultTabs r={r} lab={lab} range={range} real={real} slip={Number(params.slip_pct ?? NaN)} tab={tab} setTab={setTab}
+                research={<ResearchPanel r={r} lab={lab} params={params} msPerRun={Math.max(5, lab.ms)} meta={researchMeta} partial={real && range ? range.counts.partial : 0} dataNote={dataNote} onLoad={loadFromStudy} />} />
             </>
           )}
           <p className="foot-legal">Straddloop is a research tool. Real-data runs use 1-minute candles without bid/ask, so fills are optimistic. Nothing here is investment advice or a recommendation to trade. Options trading can lose more than the premium involved. Straddloop does not place orders.</p>
@@ -599,7 +625,7 @@ export function LabClient() {
       </main>
 
       <div className="ws-mbar">
-        <button type="button" className="qbtn" onClick={() => setDrawer(true)} aria-controls="lab-rail" aria-expanded={drawer}><Icon.sliders /> Settings{changed.length ? ` · ${changed.length}` : ''}</button>
+        <button type="button" className="qbtn" onClick={() => setDrawer(true)} aria-controls="lab-rail" aria-expanded={drawer}><Icon.sliders /> Settings{nChanged ? ` · ${nChanged}` : ''}</button>
         {runButton('run-btn--bar')}
       </div>
     </div>

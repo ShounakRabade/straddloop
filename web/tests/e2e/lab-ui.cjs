@@ -10,7 +10,7 @@ const { mockSupabase } = require('./supabaseMock.cjs');
 const BASE = process.env.BASE || 'http://localhost:3123', SHOTS = process.env.SHOTS || '/tmp/lab-ui', DAYS = process.env.DAYFILES;
 fs.mkdirSync(SHOTS, { recursive: true });
 const SIZES = [['desktop-xl', 1920, 1080], ['laptop', 1366, 768], ['tablet', 820, 1180], ['phone', 390, 844]];
-const TABS = ['overview', 'capital', 'charts', 'trades', 'sessions', 'replay', 'diagnostics', 'ledger'];
+const TABS = ['overview', 'capital', 'charts', 'trades', 'sessions', 'replay', 'research', 'diagnostics', 'ledger'];
 const log = [];
 const step = async (name, fn) => {
   try { await fn(); log.push(['PASS', name]); console.log('PASS', name); }
@@ -68,6 +68,23 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
       }
       await page.reload();
       await page.locator('#tab-ledger[aria-selected="true"]').waitFor({ timeout: 30000 });
+      await page.locator('#tab-overview').click();
+    });
+    await step(`${name}: the Research tab shows the five research views and stays mounted when you leave it`, async () => {
+      await page.locator('#tab-research').click();
+      await page.locator('#panel-research .rs').waitFor({ timeout: 30000 });
+      for (const t of ['Reading', 'Regimes', 'Robustness', 'Optimise', 'Diagnostics']) {
+        await page.locator(`#panel-research .rs .tabs button:has-text("${t}")`).click();
+        await page.waitForTimeout(250);
+        const l = await layout(page);
+        assert(l.sideways <= 1, `research ${t}: page scrolls sideways by ${l.sideways}px`);
+        assert.deepStrictEqual(l.nested, [], `research ${t}: nested scroll boxes`);
+      }
+      await page.locator('#tab-overview').click();
+      assert.strictEqual(await page.locator('#panel-research').evaluate((e) => e.hidden), true, 'the panel is hidden, not unmounted, so a running study survives');
+      await page.locator('#tab-diagnostics').click();
+      await page.locator('#panel-diagnostics .slot').first().waitFor();
+      assert(!/pending|not built yet/i.test(await page.locator('#panel-diagnostics').innerText()), 'diagnostics no longer claims the analytics are pending');
       await page.locator('#tab-overview').click();
     });
     await step(`${name}: the settings panel opens and closes (${narrow(w) ? 'drawer with Escape and scrim' : 'collapse to a spine and back'})`, async () => {
