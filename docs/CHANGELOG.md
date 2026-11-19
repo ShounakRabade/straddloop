@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased: real NIFTY data on the website
+
+* Day files: `straddloop supabase-upload` turns the local Parquet store into one gzip JSON file per
+  trading day per expiry series (about 100 KB) in the private Supabase bucket `market-data`, plus a
+  `market_days` row each. Resumable by checksum. `straddloop export-days` writes the same files locally.
+* `web/supabase/market_data.sql`: `market_days`, `data_readers` and read-only policies (readers only).
+* Website Lab: Synthetic or Real NIFTY (Dhan) data, date range, weekly or monthly series, lots, strike
+  offset, slippage, lot-size override, and a minute-by-minute day replay. Falls back to day files on
+  this computer. The page states that fills are candle-based and optimistic.
+* Engine: `strike_offset` for the straddle (default 0 keeps the original rules).
+* Expiry dates and lot sizes in day files are ASSUMED until the bhavcopy step confirms them.
+
 ## 0.1.0 (22 Oct 2026)
 
 * Phase 1 foundation: package layout, settings from `.env`, IST logging with secret masking, canonical

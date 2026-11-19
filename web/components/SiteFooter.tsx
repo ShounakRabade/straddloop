@@ -26,8 +26,8 @@ export function SiteFooter() {
           </div>
         </div>
         <p className="legal small muted">
-          Straddloop is a research tool. Every result on this site comes from a labelled synthetic model with dates in 2099; no historical
-          NSE data is used. Nothing here is investment advice or a recommendation to trade. Options trading can lose more than the premium
+          Straddloop is a research tool. Public pages show a labelled synthetic model with dates in 2099. Signed-in Lab runs on real
+          NIFTY data use 1-minute candles without bid/ask, so their fills are optimistic. Nothing here is investment advice or a recommendation to trade. Options trading can lose more than the premium
           involved. Straddloop does not place orders.
         </p>
       </div>

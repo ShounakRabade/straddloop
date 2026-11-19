@@ -132,6 +132,10 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--host", default="127.0.0.1")
     v.add_argument("--port", type=int, default=8600)
 
+    from straddloop.data.upload_cli import register as register_upload
+
+    upload_handlers = register_upload(sub)
+
     args = parser.parse_args(argv)
     setup_logging(args.log_level)
     settings = get_settings()
@@ -142,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         "import-bhavcopy": cmd_import_bhavcopy,
         "coverage": cmd_coverage,
         "serve": cmd_serve,
+        **upload_handlers,
     }
     return handlers[args.command](args, settings)
 
