@@ -1,9 +1,9 @@
 'use client';
 import { supabase } from './supabase';
-import type { StatusRow } from './rangeStates';
+import { boundsOf, type InventoryDay, type StatusRow } from './dateRange';
 
 /** One row of public.market_days: a day file in the private `market-data` bucket. */
-export interface MarketDay {
+export interface MarketDay extends InventoryDay {
   trade_date: string;
   path: string;
   series: number;
@@ -12,6 +12,7 @@ export interface MarketDay {
   lot_size: number | null;
   quality: string;
   bytes: number;
+  sha256: string | null;
 }
 
 export type ExpiryFlag = 'WEEK' | 'MONTH';
@@ -21,7 +22,7 @@ export type Availability =
   | { state: 'empty' }                      // signed in and allowed, nothing uploaded yet
   | { state: 'ready'; days: MarketDay[] };
 
-const COLS = 'trade_date,path,series,index_bars,expiry,lot_size,quality,bytes';
+const COLS = 'trade_date,path,series,index_bars,expiry,lot_size,quality,bytes,sha256';
 
 /** Every uploaded day for one series. Row-level security returns nothing to accounts not in data_readers. */
 export async function availability(underlying: string, flag: ExpiryFlag): Promise<Availability> {
@@ -59,6 +60,17 @@ export async function statuses(underlying: string, flag: ExpiryFlag): Promise<St
     if (data.length < 1000) break;
   }
   return out;
+}
+
+/**
+ * Earliest stored day, latest validated day and latest stored day of any usable quality for one series, read
+ * from the database (never hardcoded). Uses the same rules as the Lab's DateRange, so the calendar's last
+ * selectable day is exactly the last day a run can use.
+ */
+export async function datasetBounds(underlying: string, flag: ExpiryFlag): Promise<{ earliest: string | null; latest_validated: string | null; latest_any: string | null; days: number } | null> {
+  const [a, st] = await Promise.all([availability(underlying, flag), statuses(underlying, flag)]);
+  if (a.state !== 'ready') return null;
+  return { ...boundsOf(a.days, st), days: a.days.length };
 }
 
 /** Downloads day files, a few at a time. Calls onProgress after each one. */

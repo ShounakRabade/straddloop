@@ -24,8 +24,23 @@ export interface RunResult {
   extra: [string, string | number][];
   /** The financial ledger and report for the run (straddle and ORB). Absent for the four-leg stock model. */
   account?: Account;
-  /** Present when the run used real day files instead of the synthetic model. */
-  data?: { source: 'dhan'; from: string; to: string; days: number; lot_sizes: number[]; lot_source: string; expiry_source: string; flags: string[] };
+  /** Present when the run used real day files instead of the synthetic model. `range_key` is the DateRange key it ran on. */
+  data?: { source: 'dhan'; from: string; to: string; days: number; lot_sizes: number[]; lot_source: string; expiry_source: string; flags: string[]; range_key?: string | null };
+  /** One outcome per session the engine received (straddle, ORB, legs). docs/ENGINE_INTERFACES.md §2. */
+  days?: DayOutcome[];
+}
+
+/** What happened on one session of a run. `days.length` always equals the number of sessions run. */
+export interface DayOutcome {
+  date: string;
+  status: 'traded' | 'holding' | 'no_entry' | 'filtered' | 'excluded' | 'rejected';
+  /** Why it did not trade, in words; null for traded days. */
+  reason: string | null;
+  /** Legs opened / closed that day (intraday strategies open and close the same legs). */
+  opened: number;
+  closed: number;
+  /** That day's net realised P&L from the ledger. */
+  net: number;
 }
 
 export interface ReplayLeg { side: string; strike: number; kind: string; entry_t: number; entry_px: number; exit_t: number | null; exit_px: number | null; exit_reason: string | null; stop: number | null; net: number }

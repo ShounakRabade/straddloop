@@ -34,7 +34,10 @@ self.onmessage = async (ev) => {
       const flags = new Set();
       sessions.forEach(s => s.meta.flags.forEach(f => flags.add(f.split(':')[0])));
       result.data = { source: 'dhan', from: sessions[0].date, to: sessions[sessions.length - 1].date, days: sessions.length,
-        lot_sizes: lots, lot_source: sessions[0].meta.lot_source, expiry_source: sessions[0].meta.expiry_source, flags: [...flags] };
+        lot_sizes: lots, lot_source: sessions[0].meta.lot_source, expiry_source: sessions[0].meta.expiry_source, flags: [...flags],
+        range_key: params.range_key || null };
+      // The run must cover exactly the days the DateRange said would run (docs/ENGINE_INTERFACES.md §2).
+      if (result.days && result.days.length !== sessions.length) throw new Error(`internal: ${sessions.length} days loaded but ${result.days.length} day outcomes`);
     } else {
       result = compute.run(params);
     }
