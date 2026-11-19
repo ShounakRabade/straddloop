@@ -19,14 +19,71 @@ log = logging.getLogger("straddloop")
 
 
 def _days(args, settings):
+    """Day files for stored days. Days the ledger records as failed, holiday or in-flight are never
+    published; partial days are (their quality is stated in the file and the index row)."""
+    from datetime import timedelta
+
+    from straddloop.data.availability import option_key
+    from straddloop.data.ledger import Ledger
+    from straddloop.data.migrate import adopt_legacy
+    from straddloop.reference.contract_master import ContractMaster
+
     reader = StoreReader(settings.store_dir)
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
-    days = [d for d in reader.option_dates() if start <= d <= end]
+    ledger = Ledger(settings.store_dir)
+    adopt_legacy(settings.store_dir, ledger)
+    rows = ledger.days("option_candles", option_key(args.underlying, args.expiry, 1, 1), start,
+                       end + timedelta(days=1))
+    ledger.close()
+    days = [d for d in reader.option_dates() if start <= d <= end
+            and rows.get(d, {"status": "partial"})["status"] in ("validated", "partial")]
     if not days:
-        log.warning("No option candles in %s between %s and %s", settings.store_dir, start, end)
+        log.warning("No usable option candles in %s between %s and %s", settings.store_dir, start, end)
+    master = ContractMaster(settings.store_dir)
     for d in days:
         yield d, build_day(args.underlying, args.expiry, d, reader.options(d, args.underlying, args.expiry),
-                           reader.index(d, args.underlying))
+                           reader.index(d, args.underlying), master)
+
+
+def ledger_status_rows(settings, underlying: str, expiry: str, start: date, end: date) -> list[dict]:
+    """Ledger states for the range as market_day_status rows. Only days the ledger knows are sent; a day
+    that was never attempted has no row, which the website shows as 'not stored'."""
+    import json
+    from datetime import timedelta
+
+    from straddloop.data.availability import option_key
+    from straddloop.data.ledger import Ledger
+    from straddloop.data.migrate import adopt_legacy
+
+    ledger = Ledger(settings.store_dir)
+    try:
+        adopt_legacy(settings.store_dir, ledger)
+        found = ledger.days("option_candles", option_key(underlying, expiry, 1, 1), start, end + timedelta(days=1))
+    finally:
+        ledger.close()
+    out = []
+    for d, r in sorted(found.items()):
+        try:
+            reasons = json.loads(r["detail"] or "{}").get("reasons", [])
+        except (ValueError, AttributeError):
+            reasons = []
+        out.append({"underlying": underlying, "expiry_flag": expiry, "trade_date": d.isoformat(),
+                    "status": r["status"], "reason": "; ".join(reasons)[:500] or None, "rows_kept": r["rows"],
+                    "source": r["source"], "data_version": r["data_version"]})
+    return out
+
+
+def _push_statuses(sync, args, settings) -> int:
+    rows = ledger_status_rows(settings, args.underlying, args.expiry, date.fromisoformat(args.start),
+                              date.fromisoformat(args.end))
+    if rows:
+        try:
+            sync.push_statuses(rows)
+        except Exception as exc:  # the table may not exist yet: day files are already up, say so, don't fail
+            log.warning("Day files uploaded, but statuses were not published (run web/supabase/market_data.sql "
+                        "again to create market_day_status): %s", exc)
+            return 0
+    return len(rows)
 
 
 def cmd_supabase_upload(args, settings) -> int:
@@ -51,9 +108,11 @@ def cmd_supabase_upload(args, settings) -> int:
             total_bytes += len(day.blob)
             log.info("%s: uploaded %d series, %d option bars, %d index bars, %s, %.0f KB",
                      d, day.series, day.option_bars, day.index_bars, day.quality, len(day.blob) / 1024)
+        pushed = _push_statuses(sync, args, settings)
     except SupabaseError as exc:
         log.error("%s", exc)
         return 1
+    print(f"Published {pushed} day status row(s). ", end="")
     print(f"Uploaded {uploaded} day(s) ({total_bytes / 1e6:.1f} MB), {skipped} already up to date, "
           f"{empty} with no data.")
     return 0
@@ -76,10 +135,9 @@ def cmd_export_days(args, settings) -> int:
 
 def cmd_load(args, settings) -> int:
     """One command: pull the days from Dhan (resumable), then upload them for the website."""
-    from datetime import timedelta
-
+    from straddloop.data.providers.base import AuthError
     from straddloop.data.providers.dhan import DhanProvider
-    from straddloop.data.pull import pull_options, pull_underlying
+    from straddloop.data.pull import RunAborted, ensure_range
 
     if not settings.has_dhan_credentials:
         log.error("DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN must be set in .env")
@@ -87,13 +145,15 @@ def cmd_load(args, settings) -> int:
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
     provider = DhanProvider(settings.dhan_client_id, settings.dhan_access_token, settings.raw_dir,
                             settings.dhan_requests_per_second)
-    end_excl = end + timedelta(days=1)  # `load` takes an inclusive end, like the website's date picker
-    log.info("Step 1 of 2: pulling %s %s from Dhan, %s to %s (days already stored are skipped)",
+    log.info("Step 1 of 2: filling %s %s, %s to %s, from Dhan (only days not already stored)",
              args.underlying, args.expiry, start, end)
-    pull_underlying(provider, settings.store_dir, args.underlying, start, end_excl, 1)
-    s = pull_options(provider, settings.store_dir, args.underlying, start, end_excl, args.window, args.expiry, 1, 1)
-    log.info("Pulled: %d new days, %d already stored, %d with no data (holidays)",
-             len(s.days_fetched), len(s.days_skipped), len(s.holidays))
+    try:
+        s = ensure_range(provider, settings.store_dir, args.underlying, start, end, args.window, args.expiry, 1, 1)
+    except (AuthError, RunAborted) as exc:
+        log.error("%s", exc)
+        return 1
+    log.info("Pulled: %d new days (%d partial), %d already stored, %d no-session days, %d failed",
+             len(s.days_fetched), len(s.days_partial), len(s.days_skipped), len(s.holidays), len(s.days_failed))
     log.info("Step 2 of 2: uploading to Supabase")
     return cmd_supabase_upload(args, settings)
 

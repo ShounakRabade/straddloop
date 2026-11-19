@@ -13,6 +13,11 @@ class ProviderError(RuntimeError):
     """A provider call failed or returned something we cannot interpret. Never swallowed silently."""
 
 
+class AuthError(ProviderError):
+    """Token expired/invalid, or the account lacks the Data API subscription. Retrying cannot help: a run
+    stops on this, leaving everything already stored (and the ledger) untouched."""
+
+
 @dataclass(frozen=True)
 class ExpiredOptionRequest:
     underlying: str

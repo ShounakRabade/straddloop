@@ -46,6 +46,27 @@ drop policy if exists "market_days: readers read" on public.market_days;
 create policy "market_days: readers read" on public.market_days for select to authenticated
   using ((select public.is_data_reader()));
 
+-- Ingestion state per day, pushed from the local ledger by `straddloop supabase-upload`. The Lab shows
+-- these next to the day files: validated, partial, failed, downloading, holiday. A weekday with no row
+-- and no file is "not stored". Safe to re-run; the Lab works without this table (it then reads the
+-- day files' own quality).
+create table if not exists public.market_day_status (
+  underlying text not null,
+  expiry_flag text not null check (expiry_flag in ('WEEK', 'MONTH')),
+  trade_date date not null,
+  status text not null check (status in ('validated', 'partial', 'failed', 'downloading', 'holiday')),
+  reason text,
+  rows_kept integer not null default 0,
+  source text,
+  data_version integer not null default 1,
+  updated_at timestamptz not null default now(),
+  primary key (underlying, expiry_flag, trade_date)
+);
+alter table public.market_day_status enable row level security;
+drop policy if exists "market_day_status: readers read" on public.market_day_status;
+create policy "market_day_status: readers read" on public.market_day_status for select to authenticated
+  using ((select public.is_data_reader()));
+
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values ('market-data', 'market-data', false, 5242880, array['application/gzip'])
 on conflict (id) do update set public = false, file_size_limit = excluded.file_size_limit,

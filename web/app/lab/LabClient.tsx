@@ -8,7 +8,8 @@ import { ReplayPanel } from '@/components/Replay';
 import { STRATEGIES, SYNTHETIC_KEYS, bySlug, describeParams } from '@/lib/strategies';
 import { useLab, type DayRef } from '@/lib/useLab';
 import { saveRun } from '@/lib/store';
-import { availability, download, readLocal, type Availability, type ExpiryFlag } from '@/lib/marketData';
+import { availability, download, readLocal, statuses, type Availability, type ExpiryFlag } from '@/lib/marketData';
+import { summarizeRange, type StatusRow } from '@/lib/rangeStates';
 import { inr, shortDate } from '@/lib/format';
 import type { Params, StrategySlug } from '@/lib/types';
 
@@ -41,6 +42,7 @@ export function LabClient() {
   const [source, setSource] = useState<Source>('synthetic');
   const [flag, setFlag] = useState<ExpiryFlag>('WEEK');
   const [avail, setAvail] = useState<Availability | null>(null);
+  const [dayStatus, setDayStatus] = useState<StatusRow[]>([]);
   const [local, setLocal] = useState<LocalDay[] | null>(null);
   const [range, setRange] = useState<{ from: string; to: string }>({ from: '', to: '' });
   const [loading, setLoading] = useState<{ done: number; total: number } | null>(null);
@@ -77,7 +79,8 @@ export function LabClient() {
   useEffect(() => {
     if (!real || local) return;
     let live = true;
-    setAvail(null); setDataErr(null);
+    setAvail(null); setDataErr(null); setDayStatus([]);
+    statuses('NIFTY', flag).then((r) => live && setDayStatus(r)).catch(() => undefined);
     availability('NIFTY', flag).then((a) => {
       if (!live) return;
       setAvail(a);
@@ -141,6 +144,9 @@ export function LabClient() {
     : slug === 'fourleg' ? `${params.months} months, four stocks` : `${params.days} sessions, seed ${params.seed}`;
   const span = avail?.state === 'ready' ? { min: avail.days[0].trade_date, max: avail.days[avail.days.length - 1].trade_date }
     : local?.length ? { min: local[0].date, max: local[local.length - 1].date } : null;
+  const summary = useMemo(
+    () => summarizeRange(range.from, range.to, avail?.state === 'ready' ? avail.days : [], dayStatus),
+    [range, avail, dayStatus]);
   const fileLot = avail?.state === 'ready' ? avail.days.find((d) => d.trade_date >= range.from)?.lot_size ?? null : null;
 
   async function pickFiles(files: FileList | null) {
@@ -220,7 +226,23 @@ export function LabClient() {
                         <input className="input input--sm" type="date" value={range.to} onChange={(e) => setRange((x) => ({ ...x, to: e.target.value }))} /></label>
                     </div>
                     <p className="help">{chosen.length} trading day{chosen.length === 1 ? '' : 's'} selected · stored {shortDate(span.min)} to {shortDate(span.max)}{local ? ' · from files on this computer' : ''}</p>
-                    {!local && range.from && range.to && (range.from < span.min || range.to > span.max) && (
+                    {!local && range.from && range.to && (
+                      <div className="small stack" style={{ ['--gap' as string]: '4px' }} aria-label="Data availability for this range">
+                        <p>
+                          <strong>{summary.counts.validated}</strong> validated
+                          {summary.counts.partial > 0 && <> · <strong>{summary.counts.partial}</strong> partial</>}
+                          {summary.counts.failed > 0 && <> · <strong>{summary.counts.failed}</strong> failed</>}
+                          {summary.counts.downloading > 0 && <> · <strong>{summary.counts.downloading}</strong> downloading</>}
+                          {' '}· <strong>{summary.counts.missing}</strong> not stored · {summary.counts.holiday} holiday{summary.counts.holiday === 1 ? '' : 's'}
+                        </p>
+                        {summary.problems.slice(0, 5).map((p) => (
+                          <p key={p.date} className="muted">{shortDate(p.date)}: {p.state}{p.reason ? `, ${p.reason}` : ''}</p>
+                        ))}
+                        {summary.problems.length > 5 && <p className="muted">and {summary.problems.length - 5} more</p>}
+                        {summary.counts.partial > 0 && <p className="muted">Partial days are included in the run; their gaps stay gaps, nothing is filled in.</p>}
+                      </div>
+                    )}
+                    {!local && range.from && range.to && (summary.counts.missing > 0 || summary.counts.failed > 0 || range.from < span.min || range.to > span.max) && (
                       <div className="small stack" style={{ ['--gap' as string]: '6px' }}>
                         <p>Some of these dates are not stored yet. Run this on your computer, then come back and rerun:</p>
                         <code className="cmd">{`straddloop load --expiry ${flag} --start ${range.from} --end ${range.to}`}</code>

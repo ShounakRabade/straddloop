@@ -45,6 +45,19 @@ resumable: stop it at any time and run the same command again; finished days and
 Raw API responses are archived under `data/raw/dhan/` next to the request that produced them.
 Validated candles go to `data/store/` as Parquet. Reports go to `data/reports/`.
 
+## Historical data
+
+Backtests read a local store; Dhan is only used to fill days that are missing. See
+[docs/DATA_ARCHITECTURE.md](docs/DATA_ARCHITECTURE.md) and [docs/BHAVCOPY.md](docs/BHAVCOPY.md).
+
+```bash
+straddloop dhan-preflight                                   # token expiry and data plan
+straddloop load --expiry WEEK --start 2025-10-06 --end 2025-10-17   # fills only missing days, then uploads
+straddloop availability --start 2025-10-06 --end 2025-10-17          # validated / partial / failed / missing
+straddloop bhav-download --start 2025-10-06 --end 2025-10-17         # or: straddloop import-bhavcopy <folder>
+straddloop reconcile --start 2025-10-06 --end 2025-10-17             # Dhan vs exchange
+```
+
 ## Layout
 
 | Path | Purpose |

@@ -11,6 +11,7 @@ caller must therefore write everything for a partition in one call (all strikes,
 from __future__ import annotations
 
 import hashlib
+import os
 from collections import defaultdict
 from pathlib import Path
 
@@ -48,7 +49,13 @@ def write_records(root: Path, dataset: str, records: list, record_type: type) ->
         part = _partition(root, dataset, source, underlying, day, series or None)
         part.mkdir(parents=True, exist_ok=True)
         path = part / "part.parquet"
-        pq.write_table(to_table(rows, record_type), path)
+        # Write beside the target and rename: a crash mid-write leaves the old file intact, never a torn one.
+        tmp = part / f".part.parquet.{os.getpid()}.tmp"
+        try:
+            pq.write_table(to_table(rows, record_type), tmp)
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
         written.append(path)
     return written
 
@@ -80,3 +87,27 @@ def query(root: Path, dataset: str, sql_where: str = "TRUE", params: list | None
     )
     fetch = getattr(rel, "to_arrow_table", None) or rel.fetch_arrow_table  # name differs by DuckDB version
     return fetch()
+
+
+NATURAL_KEYS = {
+    "underlying_candles": ("underlying", "interval_min", "ts"),
+    "option_candles": ("underlying", "expiry_flag", "expiry_code", "interval_min", "option_type", "moneyness", "ts"),
+    "contracts": ("trade_date", "exchange", "symbol", "instrument", "expiry", "strike", "option_type"),
+}
+
+
+def duplicate_keys(root: Path, dataset: str, limit: int = 20) -> tuple[int, list[tuple]]:
+    """Count natural keys that appear more than once across ALL files of a dataset (e.g. one day written
+    under two partition layouts). Returns (number of duplicated keys, first `limit` examples)."""
+    files = dataset_files(root, dataset)
+    if not files:
+        return 0, []
+    cols = ", ".join(NATURAL_KEYS[dataset])
+    shown = ", ".join(f"CAST({c} AS VARCHAR)" for c in NATURAL_KEYS[dataset])  # text: no tz library needed
+    con = duckdb.connect()
+    paths = [str(p) for p in files]
+    q = (f"SELECT {cols}, count(*) n FROM read_parquet(?, hive_partitioning = false) "
+         f"GROUP BY {cols} HAVING count(*) > 1")
+    total = con.execute(f"SELECT count(*) FROM ({q})", [paths]).fetchone()[0]
+    examples = con.execute(f"SELECT {shown}, n FROM ({q}) LIMIT {int(limit)}", [paths]).fetchall()
+    return total, examples
