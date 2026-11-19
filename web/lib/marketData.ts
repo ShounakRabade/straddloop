@@ -1,5 +1,6 @@
 'use client';
 import { supabase } from './supabase';
+import type { StatusRow } from './rangeStates';
 
 /** One row of public.market_days: a day file in the private `market-data` bucket. */
 export interface MarketDay {
@@ -40,6 +41,24 @@ export async function availability(underlying: string, flag: ExpiryFlag): Promis
     if (!data || data.length < 1000) break;
   }
   return days.length ? { state: 'ready', days } : { state: 'empty' };
+}
+
+/**
+ * Ingestion statuses uploaded by `straddloop supabase-upload` (table market_day_status). Returns [] when the
+ * table does not exist yet or cannot be read: the Lab then falls back to what the day files themselves say.
+ */
+export async function statuses(underlying: string, flag: ExpiryFlag): Promise<StatusRow[]> {
+  const sb = supabase();
+  if (!sb) return [];
+  const out: StatusRow[] = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await sb.from('market_day_status').select('trade_date,status,reason')
+      .eq('underlying', underlying).eq('expiry_flag', flag).order('trade_date').range(from, from + 999);
+    if (error || !data) return [];
+    out.push(...(data as StatusRow[]));
+    if (data.length < 1000) break;
+  }
+  return out;
 }
 
 /** Downloads day files, a few at a time. Calls onProgress after each one. */

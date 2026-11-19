@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased: historical data pipeline
+
+* Ingestion ledger (SQLite beside the Parquet store): per-day state, append-only ingest log, bhavcopy file log.
+* `load` / `ensure_range` fill only missing days; holidays need both feeds empty; partial and failed days are
+  recorded with reasons; atomic file writes; resume after crash or expired token; legacy markers adopted.
+* Dhan client: `AuthError`, jittered exponential backoff, `Retry-After`, network-error retries, payload checks, `dhan-preflight`.
+* NSE bhavcopy: UDiFF and legacy layouts, downloader, manual import, validation, contract master, reconciliation.
+* Day files use bhavcopy expiry and lot size when stored. Lab shows per-range data states.
+* New commands: `availability`, `bhav-download`, `reconcile`, `store-check`, `ingest-log`, `dhan-preflight`.
+* `market_day_status` table in `web/supabase/market_data.sql` (re-run it in the SQL editor).
+
 ## Unreleased: Dhan pull fixes (19 Nov 2026)
 
 * First run against real Dhan data. Rolling-option calls now fetch one day each: Dhan refuses any
