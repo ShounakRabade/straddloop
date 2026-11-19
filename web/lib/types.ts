@@ -16,7 +16,8 @@ export interface RunResult {
   gross: number;
   costs: number;
   avg: number;
-  ci: [number, number];
+  /** 95% interval of the average (Student t). null when there are fewer than two observations. */
+  ci: [number, number] | null;
   t: number;
   winRate: number;
   maxDD: number;
@@ -64,7 +65,7 @@ export interface Replay {
 }
 
 export interface RunSummary {
-  net: number; traded: number; winRate: number; avg: number; ci: [number, number]; maxDD: number; costs: number;
+  net: number; traded: number; winRate: number; avg: number; ci: [number, number] | null; maxDD: number; costs: number;
   unit: RunResult['unit']; spark: number[];
 }
 

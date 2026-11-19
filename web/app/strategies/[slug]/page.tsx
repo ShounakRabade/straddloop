@@ -65,7 +65,7 @@ export default async function StrategyPage({ params }: Props) {
             <p className="prose">{s.synthetic}</p>
             <div className="kpis">
               <div className="kpi kpi--lead"><span className="label">Net after costs</span><span className={`v ${tone(r.net)}`}>{figure(r.net)}</span></div>
-              <div className="kpi"><span className="label">Average {unit}</span><span className={`v ${tone(r.avg)}`}>{figure(r.avg)}</span><span className="s">95% range {inr(r.ci[0])} to {inr(r.ci[1], { sign: true })}</span></div>
+              <div className="kpi"><span className="label">Average {unit}</span><span className={`v ${tone(r.avg)}`}>{figure(r.avg)}</span><span className="s">{r.ci ? <>95% range {inr(r.ci[0])} to {inr(r.ci[1], { sign: true })}</> : 'One observation has no range'}</span></div>
               <div className="kpi"><span className="label">Won</span><span className="v">{pct(r.winRate)}</span><span className="s">of {r.traded} {r.unit}s</span></div>
               <div className="kpi"><span className="label">Deepest drawdown</span><span className="v loss">{inr(r.maxDD)}</span></div>
             </div>

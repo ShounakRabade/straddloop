@@ -22,5 +22,5 @@ const out = {
   scenarios: compute.scenarios(),
 };
 writeFileSync(new URL('../lib/precomputed.json', import.meta.url), JSON.stringify(out, round));
-for (const k of ['straddle', 'orb', 'fourleg']) console.log(k, Math.round(out[k].net), out[k].traded, out[k].winRate.toFixed(1), out[k].ci.map(Math.round), out[k].curve.length);
+for (const k of ['straddle', 'orb', 'fourleg']) console.log(k, Math.round(out[k].net), out[k].traded, out[k].winRate.toFixed(1), (out[k].ci || []).map(Math.round), out[k].curve.length);
 console.log(out.scenarios.map(s => `${s.key}: ${s.straddle ? Math.round(s.straddle.net) : 'no entry'} / ${s.orb ? Math.round(s.orb.net) : 'no trade'}`).join('\n'));
