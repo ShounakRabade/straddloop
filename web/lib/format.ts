@@ -23,3 +23,14 @@ export function shortDate(iso: string): string {
   const d = new Date(iso);
   return isNaN(d.getTime()) ? iso : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 }
+
+const inrFmt2 = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+/** ₹ with paise, for charges and per-trade figures where rounding to the rupee would hide a reconciliation gap. */
+export function inr2(value: number | null | undefined, opts: { sign?: boolean } = {}): string {
+  if (value == null || !isFinite(value)) return '—';
+  const body = `₹${inrFmt2.format(Math.abs(value))}`;
+  if (value < -0.004) return `−\u2060${body}`;
+  return opts.sign && value > 0.004 ? `+\u2060${body}` : body;
+}
+export const pct2 = (v: number | null | undefined, digits = 2) => (v == null || !isFinite(v) ? '—' : `${v.toFixed(digits)}%`);
+export const num2 = (v: number | null | undefined, digits = 2) => (v == null || !isFinite(v) ? '—' : v.toFixed(digits));

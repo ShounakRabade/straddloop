@@ -3,7 +3,7 @@
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory;
   else root.makeStraddloopCompute = factory;
-})(typeof self !== 'undefined' ? self : this, function (E, F) {
+})(typeof self !== 'undefined' ? self : this, function (E, F, L) {
   const cache = new Map();
   function memo(key, make) {
     if (!cache.has(key)) { if (cache.size > 6) cache.delete(cache.keys().next().value); cache.set(key, make()); }
@@ -21,7 +21,61 @@
   // The straddle engine already reads it that way; the ORB engine counts +N as in the money, so it is flipped.
   function common(p, flip) {
     const off = Math.round(num(p.strike_offset, 0));
-    return { lots: Math.max(1, Math.round(num(p.lots, 1))), strike_offset: flip ? -off : off, slip_pct: num(p.slip_pct, 0.5) };
+    return { lots: Math.max(1, Math.round(num(p.lots, 1))), strike_offset: flip ? -off : off, slip_pct: num(p.slip_pct, 0.5),
+      rates_for: L.ratesHook, brokerage_per_order: num(p.brokerage_per_order, L.ACCOUNT_DEFAULTS.brokerage_per_order) };
+  }
+
+  /** Account settings from the Lab's parameters. Unset values fall back to the ledger defaults. */
+  function accountOf(p) {
+    const a = {};
+    const map = { capital: 'initial_capital', margin_policy: 'margin_policy', margin_span_pct: 'margin_span_pct', margin_exposure_pct: 'margin_exposure_pct',
+      brokerage_per_order: 'brokerage_per_order', risk_free_pct: 'risk_free_pct' };
+    for (const k of Object.keys(map)) if (p[k] !== undefined && p[k] !== '') a[map[k]] = p[k];
+    return a;
+  }
+
+  /** A cheap content fingerprint of the sessions a run used, so a result names the exact data behind it. */
+  function fingerprint(sessions) {
+    let s = '';
+    for (const x of sessions) {
+      let acc = 0;
+      for (const ex of x.expiries) for (const k of Object.keys(ex.contracts)) { const c = ex.contracts[k].c; for (let i = 0; i < c.length; i++) if (c[i] != null) acc += c[i] * ((i % 7) + 1); }
+      let u = 0; for (const v of x.und.c) if (v != null) u += v;
+      s += `${x.date}|${x.times.length}|${x.expiries.map(e => e.expiry + ':' + e.lot_size + ':' + Object.keys(e.contracts).length).join(',')}|${u.toFixed(2)}|${acc.toFixed(2)};`;
+    }
+    return L.hashStr(s) + ':' + sessions.length;
+  }
+
+  const sumN = xs => xs.reduce((a, b) => a + b, 0);
+  function sdOf(xs) { const n = xs.length; if (n < 2) return 0; const m = sumN(xs) / n; return Math.sqrt(sumN(xs.map(x => (x - m) ** 2)) / (n - 1)); }
+
+  /** Runs the ledger over a run's results and rewrites the headline figures from it, so the page, the report
+   *  and the CSVs all come from one source. Returns the extra fields for the result. */
+  function withLedger(strategy, results, engineCfgHash, p, sessions, base) {
+    const info = { symbol: sessions && sessions[0] ? sessions[0].symbol : 'NIFTY', engine_cfg_hash: engineCfgHash, data_fingerprint: sessions ? fingerprint(sessions) : 'synthetic:' + L.hashStr(JSON.stringify([p.days, p.seed, p.iv])) };
+    const led = L.runLedger(results, accountOf(p), info);
+    const rep = led.report;
+    rep.generated.run_hash = L.hashStr([engineCfgHash, rep.generated.account_hash, info.data_fingerprint, L.COST_TABLE_VERSION].join('|'));
+    last.ledger = led;
+    const cap = led.acct.initial_capital;
+    const dayNets = led.daily.filter(d => d.trades > 0).map(d => d.net_realised);
+    const wins = dayNets.filter(x => x > 0), loss = dayNets.filter(x => x <= 0);
+    const perf = rep.performance;
+    const head = Object.assign({}, base, {
+      net: rep.pnl.net_profit, gross: rep.pnl.net_realised_gross, costs: rep.pnl.total_charges, maxDD: -rep.risk.max_drawdown,
+      curve: led.daily.map(d => ({ d: d.date, v: d.closing_balance - cap, p: d.net_realised })),
+    });
+    if (base.unit === 'day') {
+      const n = dayNets.length, mean = n ? sumN(dayNets) / n : 0, sd = sdOf(dayNets);
+      Object.assign(head, { traded: n, avg: mean, ci: n > 1 ? [mean - 1.96 * sd / Math.sqrt(n), mean + 1.96 * sd / Math.sqrt(n)] : [mean, mean], t: n > 1 && sd > 0 ? mean / (sd / Math.sqrt(n)) : null,
+        winRate: n ? 100 * wins.length / n : 0, profitFactor: loss.length && sumN(loss) < 0 ? sumN(wins) / -sumN(loss) : null,
+        worst: n ? Math.min(...dayNets) : 0, best: n ? Math.max(...dayNets) : 0 });
+    } else {
+      Object.assign(head, { traded: perf.closed_positions, avg: perf.expectancy || 0, ci: perf.ci95_trade || [perf.expectancy || 0, perf.expectancy || 0], t: perf.t_stat_trade,
+        winRate: perf.win_rate_pct || 0, profitFactor: perf.profit_factor, worst: perf.largest_loss || 0, best: perf.largest_win || 0 });
+    }
+    head.account = { config: led.acct, report: rep, daily: led.daily, rejections: led.rejections, liquidations: led.liquidations, counts: { trades: led.tradebook.length, fills: led.fills.length } };
+    return head;
   }
 
   let last = null;  // the latest run's per-day results, for the day replay
@@ -31,11 +85,12 @@
       sl_pct: num(p.sl_pct, 36), target_per_lot: num(p.target_per_lot, 1000),
       reentry_enabled: p.reentry_enabled !== false, entry_condition: p.entry_condition || 'full',
     }, common(p)));
-    const bt = E.runBacktest(sessions || calendar(p), cfg), m = bt.metrics;
+    const sess = sessions || calendar(p);
+    const bt = E.runBacktest(sess, cfg), m = bt.metrics;
     last = { strategy: 'straddle', results: bt.results, cfg };
     const exits = {};
     bt.results.forEach(r => { if (r.status === 'traded') exits[r.exit_reason] = (exits[r.exit_reason] || 0) + 1; });
-    return {
+    return withLedger('straddle', bt.results, bt.config_hash, p, sessions, {
       strategy: 'straddle', unit: 'day', sessions: m.sessions_total, traded: m.sessions_traded,
       net: m.net_pnl || 0, gross: m.gross_pnl || 0, costs: m.costs || 0, avg: m.avg_daily_pnl || 0,
       ci: m.ci95_mean || [m.avg_daily_pnl || 0, m.avg_daily_pnl || 0], t: m.t_stat_mean,
@@ -47,7 +102,7 @@
         ['Average winning day', m.avg_win], ['Average losing day', m.avg_loss],
         ['Costs per traded day', m.sessions_traded ? m.costs / m.sessions_traded : 0],
       ],
-    };
+    });
   }
 
   function orb(p, sessions) {
@@ -60,7 +115,7 @@
     last = { strategy: 'orb', results: run.results, cfg };
     const lo = m.expectancy - 1.96 * (m.trade_t_stat ? Math.abs(m.expectancy / m.trade_t_stat) : 0);
     const hi = m.expectancy + 1.96 * (m.trade_t_stat ? Math.abs(m.expectancy / m.trade_t_stat) : 0);
-    return {
+    return withLedger('orb', run.results, run.config_hash, p, sessions, {
       strategy: 'orb', unit: 'trade', sessions: m.sessions_total, traded: m.trades,
       net: m.net_pnl || 0, gross: m.gross_pnl || 0, costs: m.costs || 0, avg: m.expectancy || 0,
       ci: [lo || 0, hi || 0], t: m.trade_t_stat,
@@ -72,7 +127,7 @@
         ['Best open gain, average', m.avg_mfe], ['Worst open loss, average', m.avg_mae],
         ['Breakout candles seen', `${m.breakouts}`],
       ],
-    };
+    });
   }
 
   function fourleg(p) {
@@ -82,6 +137,7 @@
       long_call_lots: longLots, long_put_lots: longLots, short_call_pct: dist, short_put_pct: dist,
       target_pct_margin: num(p.target_pct_margin, 10),
     });
+    last = null;
     const run = F.run(data, cfg), pol = p.policy === 'B' ? 'B' : 'A', m = run.metrics[pol], o = run.metrics[pol === 'A' ? 'B' : 'A'];
     return {
       strategy: 'fourleg', unit: 'month', policy: pol, sessions: m.cycles, traded: m.traded,
@@ -130,5 +186,22 @@
     };
   }
 
-  return { run: (p, sessions) => ({ straddle, orb, fourleg })[p.strategy](p, sessions), scenarios, replay };
+  /** CSV text for the latest run: tradebook, ledger (every fill), daily, performance. */
+  function exportCsv(kind) {
+    if (!last || !last.ledger) return null;
+    const led = last.ledger;
+    if (kind === 'tradebook') return L.toCsv(led.tradebook, L.TRADEBOOK_COLS);
+    if (kind === 'ledger') return L.toCsv(led.fills, L.FILL_COLS);
+    if (kind === 'daily') return L.toCsv(led.daily, L.DAILY_COLS);
+    if (kind === 'performance') return L.performanceCsv(led.report);
+    throw new Error('unknown export: ' + kind);
+  }
+  /** A page of rows of the latest run for the in-page inspector. */
+  function inspect(kind, offset, limit) {
+    if (!last || !last.ledger) return null;
+    const led = last.ledger, rows = kind === 'ledger' ? led.fills : kind === 'daily' ? led.daily : led.tradebook;
+    return { kind, total: rows.length, offset, rows: rows.slice(offset, offset + limit) };
+  }
+
+  return { run: (p, sessions) => ({ straddle, orb, fourleg })[p.strategy](p, sessions), scenarios, replay, exportCsv, inspect };
 });

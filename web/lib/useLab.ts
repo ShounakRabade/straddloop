@@ -1,8 +1,9 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Params, Replay, RunResult } from './types';
+import type { ExportKind, LedgerRow, Params, Replay, RunResult } from './types';
 
 type State = { status: 'idle' | 'running' | 'done' | 'error'; result: RunResult | null; error: string | null; ms: number };
+export type Page = { kind: string; total: number; offset: number; rows: LedgerRow[] };
 export type DayRef = { path: string; buf?: ArrayBuffer };
 
 /** Runs a backtest in the engine worker. Only the latest request's answer is kept.
@@ -10,7 +11,7 @@ export type DayRef = { path: string; buf?: ArrayBuffer };
 export function useLab() {
   const worker = useRef<Worker | null>(null);
   const latest = useRef(0);
-  const waiting = useRef(new Map<number, (r: Replay | null) => void>());
+  const waiting = useRef(new Map<number, (r: { ok: boolean; replay?: Replay | null; csv?: string | null; page?: Page | null; error?: string }) => void>());
   const replays = useRef(0);
   const [state, setState] = useState<State>({ status: 'idle', result: null, error: null, ms: 0 });
 
@@ -18,9 +19,9 @@ export function useLab() {
     const w = new Worker('/engine/worker.js');
     worker.current = w;
     w.onmessage = (ev: MessageEvent) => {
-      const { id, ok, result, error, ms, replay } = ev.data;
+      const { id, ok, result, error, ms } = ev.data;
       const cb = waiting.current.get(id);
-      if (cb) { waiting.current.delete(id); cb(ok ? replay : null); return; }
+      if (cb) { waiting.current.delete(id); cb(ev.data); return; }
       if (id !== latest.current) return;
       setState(ok ? { status: 'done', result, error: null, ms } : { status: 'error', result: null, error, ms: 0 });
     };
@@ -35,14 +36,19 @@ export function useLab() {
     worker.current?.postMessage({ id: latest.current, params, days }, transfer);
   }, []);
 
-  const replay = useCallback((date: string) => new Promise<Replay | null>((resolve) => {
-    replays.current += 1;  // negative ids: a replay never touches the run result
+  const ask = useCallback(<T,>(msg: Record<string, unknown>, pick: (d: { ok: boolean; replay?: Replay | null; csv?: string | null; page?: Page | null; error?: string }) => T) => new Promise<T>((resolve) => {
+    replays.current += 1;  // negative ids: a side request never touches the run result
     const id = -replays.current;
-    waiting.current.set(id, resolve);
-    worker.current?.postMessage({ id, replay: date });
+    waiting.current.set(id, (d) => resolve(pick(d)));
+    worker.current?.postMessage({ id, ...msg });
   }), []);
+  const replay = useCallback((date: string) => ask({ replay: date }, (d) => (d.ok ? d.replay ?? null : null)), [ask]);
+  /** CSV text of the latest run, made in the worker from the same ledger the page shows. */
+  const exportCsv = useCallback((kind: ExportKind) => ask({ exportKind: kind }, (d) => (d.ok ? d.csv ?? null : null)), [ask]);
+  /** One page of tradebook / ledger / daily rows of the latest run. */
+  const inspect = useCallback((kind: 'tradebook' | 'ledger' | 'daily', offset: number, limit: number) => ask({ inspect: { kind, offset, limit } }, (d) => (d.ok ? d.page ?? null : null)), [ask]);
 
   const fail = useCallback((error: string) => setState({ status: 'error', result: null, error, ms: 0 }), []);
 
-  return { ...state, run, replay, fail };
+  return { ...state, run, replay, exportCsv, inspect, fail };
 }

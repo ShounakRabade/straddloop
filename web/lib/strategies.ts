@@ -39,6 +39,18 @@ const sample: Field[] = [
   { key: 'iv', label: 'Model implied vol', help: 'Realised vol in the model is 12%. Above that, option sellers are overpaid; below, underpaid.', kind: 'range', min: 9, max: 22, step: 1, unit: '%' },
 ];
 
+/** Account and margin settings, shared by the two intraday strategies. Margin is ESTIMATED, never actual. */
+export const ACCOUNT_DEFAULTS = { capital: 500000, margin_policy: 'reject', margin_span_pct: 9, margin_exposure_pct: 2, brokerage_per_order: 20 };
+const account: Field[] = [
+  { key: 'capital', label: 'Starting capital', help: 'Cash in the account before the first trade. Margin, the available balance and every return are measured against it.', kind: 'choice',
+    options: [{ value: 200000, label: '₹2 lakh' }, { value: 500000, label: '₹5 lakh' }, { value: 1000000, label: '₹10 lakh' }, { value: 2500000, label: '₹25 lakh' }, { value: 10000000, label: '₹1 crore' }] },
+  { key: 'margin_policy', label: 'If margin is short', help: 'What the account does when a new position needs more margin than is free. Every case is listed in the report.', kind: 'choice',
+    options: [{ value: 'reject', label: 'Reject the trade' }, { value: 'partial', label: 'Fewer lots' }, { value: 'liquidate', label: 'Force-close' }, { value: 'record', label: 'Record only' }] },
+  { key: 'margin_span_pct', label: 'Margin model: SPAN-like', help: 'ESTIMATED margin on a short option = this % + the exposure % below, of strike × quantity. It is not exchange SPAN output and not your broker’s historical margin.', kind: 'range', min: 4, max: 20, step: 0.5, unit: '%' },
+  { key: 'margin_exposure_pct', label: 'Margin model: exposure', help: 'Exposure margin, same base. Long options need only their premium.', kind: 'range', min: 0, max: 5, step: 0.5, unit: '%' },
+  { key: 'brokerage_per_order', label: 'Brokerage per order', help: 'Flat fee on every executed order. Statutory charges use the rates in force on each trade date.', kind: 'range', min: 0, max: 60, step: 5, prefix: '₹' },
+];
+
 export const STRATEGIES: Strategy[] = [
   {
     slug: 'straddle',
@@ -71,9 +83,9 @@ export const STRATEGIES: Strategy[] = [
       { title: 'The filter selects quiet first hours, not quiet days', body: 'An inside 09:45 candle says nothing about an afternoon trend or a volatility event.' },
       { title: 'Costs are a quarter of the target', body: 'At default rates a day costs roughly ₹110–240 per lot across four to six fills, before slippage.' },
     ],
-    synthetic: 'On 120 synthetic sessions it traded 63 days, won 71% of them and still lost ₹32,791 after costs: the average losing day was about four times the average winner. Re-entry legs lost money at every implied-vol level tested.',
+    synthetic: 'On 120 synthetic sessions it traded 63 days, won 71% of them and still lost ₹32,885 after costs: the average losing day was about four times the average winner. Re-entry legs lost money at every implied-vol level tested.',
     experiments: ['Original rules on 2+ years of real data, with costs for the period', 'Re-entry on against re-entry off', 'Stop sweep from 20% to 75%: look for a plateau, not a peak', 'Target against no target, plus a daily loss cap', 'Slippage from 0 to 2%: if the result dies at 1%, it is not tradeable'],
-    defaults: { strategy: 'straddle', days: 120, seed: 1, iv: 13, sl_pct: 36, target_per_lot: 1000, reentry_enabled: true, entry_condition: 'full', lots: 1, strike_offset: 0, slip_pct: 0.5 },
+    defaults: { strategy: 'straddle', days: 120, seed: 1, iv: 13, sl_pct: 36, target_per_lot: 1000, reentry_enabled: true, entry_condition: 'full', lots: 1, strike_offset: 0, slip_pct: 0.5, ...ACCOUNT_DEFAULTS },
     fields: [
       { key: 'sl_pct', label: 'Stop per leg', help: 'How far above its sell price a leg may rise before it is bought back.', kind: 'range', min: 20, max: 75, step: 1, unit: '%' },
       { key: 'target_per_lot', label: 'Profit target per lot', help: 'Net of costs. Everything closes when this is reached.', kind: 'range', min: 500, max: 3000, step: 100, prefix: '₹' },
@@ -81,6 +93,7 @@ export const STRATEGIES: Strategy[] = [
       { key: 'entry_condition', label: 'Entry candle must', help: 'How strictly the 09:45 candle has to sit inside the opening range.', kind: 'choice',
         options: [{ value: 'full', label: 'Stay fully inside' }, { value: 'body', label: 'Body inside' }, { value: 'close', label: 'Close inside' }, { value: 'overlap', label: 'Touch the range' }] },
       ...trade('0 sells the ATM straddle. +N sells the call N strikes above and the put N strikes below ATM (a strangle); −N sells both in the money.'),
+      ...account,
       ...sample,
     ],
   },
@@ -116,9 +129,9 @@ export const STRATEGIES: Strategy[] = [
       { title: 'Long options pay for time', body: 'Theta and falling implied vol after the open work against every trade.' },
       { title: 'Breakouts are frequent', body: 'About two breakout candles a day on the synthetic calendar, so “no breakout” days are rare without a filter.' },
     ],
-    synthetic: 'On 120 synthetic sessions it traded every day, won 35% of trades and lost ₹14,372. 86% of trades left on the reversal level after about 14 minutes. Of 29 variants tried, none was distinguishable from zero except taking a second trade, which was reliably worse.',
+    synthetic: 'On 120 synthetic sessions it traded every day, won 35% of trades and lost ₹14,856. 86% of trades left on the reversal level after about 14 minutes. Of 29 variants tried, none was distinguishable from zero except taking a second trade, which was reliably worse.',
     experiments: ['Wick breakout against close and strong-body breakouts', 'Reversal definition and buffer of 0, 5 and 10 points', 'Premium target against index target against no target', 'ATM against one strike in the money', 'Regimes by gap and opening-range width, then walk-forward'],
-    defaults: { strategy: 'orb', days: 120, seed: 1, iv: 13, target_points: 30, stop_buffer: 0, breakout_def: 'wick', target_basis: 'premium', lots: 1, strike_offset: 0, slip_pct: 0.5 },
+    defaults: { strategy: 'orb', days: 120, seed: 1, iv: 13, target_points: 30, stop_buffer: 0, breakout_def: 'wick', target_basis: 'premium', lots: 1, strike_offset: 0, slip_pct: 0.5, ...ACCOUNT_DEFAULTS },
     fields: [
       { key: 'target_points', label: 'Target', help: 'Premium points above the entry price.', kind: 'range', min: 10, max: 80, step: 5, unit: ' pts' },
       { key: 'stop_buffer', label: 'Stop buffer', help: 'Index points of room beyond the reversal candle before exiting.', kind: 'range', min: 0, max: 30, step: 1, unit: ' pts' },
@@ -127,6 +140,7 @@ export const STRATEGIES: Strategy[] = [
       { key: 'target_basis', label: 'Profit target', help: 'Turn the target off to exit only on the reversal level or at day end.', kind: 'choice',
         options: [{ value: 'premium', label: 'On' }, { value: 'none', label: 'Off' }] },
       ...trade('0 buys the ATM option. +N buys N strikes out of the money, −N in the money.'),
+      ...account,
       ...sample,
     ],
   },
