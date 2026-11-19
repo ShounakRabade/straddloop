@@ -62,3 +62,29 @@ action that fills it).
 Value before account. Four short steps, one decision each, progress always visible, back always
 possible. The first backtest runs inside the flow. Sign-up is offered after the result, as the way
 to keep it, never as a gate.
+
+## Workspace (the Lab)
+**The ledger, at instrument grade.** The Lab is a working surface, not a page: a configuration rail beside a
+full-width results area. Source: `app/lab/lab.css`, components in `components/lab/`.
+
+- **Ruled, not boxed.** Sections and figures are separated by hairline rules (`--rule`, `--rule-2`) and one
+  1.5px ink rule under each block heading. Only floating layers (tooltips, the mobile drawer) and the Run
+  button carry the hard offset shadow.
+- **Tokens** (in `globals.css`): `--canvas` (results ground), `--rail` (settings ground), `--rule`, `--rule-2`,
+  `--hover`, `--select-bg`; type steps `--t-xs` to `--t-lg`; radii `--r-sm` 4px and `--r` 6px; motion
+  `--dur-1` 140ms (hover, toggles) and `--dur-2` 220ms (sections, drawer, panels).
+- **Rail.** 320–372px (`clamp(320px, 23vw, 372px)`), sticky under the 56px app bar, its own scroll, sections
+  A–F (Strategy, Market data, Backtest period, Capital & risk, Execution, Advanced). Each section header
+  states what is set inside it and badges what changed, what must be fixed and what needs a check. The
+  footer holds the readiness checks and the Run button, always visible. Desktop collapses it to a 52px
+  spine; below 1024px it is a drawer with a scrim and a fixed bottom bar (Settings, Run).
+- **Figures.** Mono, tabular. Green and red are for P&L only; a zero is never red. A figure the engine did
+  not produce is an em dash with the reason beside it, never an estimate. Estimated figures carry an
+  `EST.` tag.
+- **Calendar.** Every day shows its data state (complete, partial, not stored, failed, holiday from the
+  unverified list) and the expiry corner; the range comes only from `lib/dateRange.ts`.
+- **Motion.** Sections open by animating `grid-template-rows`; panels fade in 4px; nothing moves on
+  scroll. `prefers-reduced-motion` turns all of it off.
+- **Layout guarantees** (checked by `tests/e2e/lab-ui.cjs` at 1920, 1366, 820 and 390px): no sideways
+  page scroll, no scroll boxes inside the results flow (wide tables scroll sideways in place), and the
+  page is exactly as tall as the workspace.
