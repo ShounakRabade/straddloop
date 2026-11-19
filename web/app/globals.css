@@ -22,6 +22,17 @@
   --shadow-sm: 3px 3px 0 var(--ink);
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 
+  /* Workspace layer (the Lab). See DESIGN.md "Workspace". */
+  --canvas: oklch(0.979 0.007 92);
+  --rail: oklch(0.952 0.014 92);
+  --rule: color-mix(in oklch, var(--ink) 12%, transparent);
+  --rule-2: color-mix(in oklch, var(--ink) 26%, transparent);
+  --hover: color-mix(in oklch, var(--ink) 5%, transparent);
+  --select-bg: color-mix(in oklch, var(--cobalt) 11%, var(--card));
+  --t-xs: 0.6875rem; --t-sm: 0.8125rem; --t-base: 0.9375rem; --t-md: 1rem; --t-lg: 1.125rem;
+  --r-sm: 4px; --r: 6px;
+  --dur-1: 140ms; --dur-2: 220ms;
+
   --font-sans: var(--font-archivo), 'Archivo', system-ui, sans-serif;
   --font-mono: var(--font-plex-mono), 'IBM Plex Mono', ui-monospace, monospace;
 }
