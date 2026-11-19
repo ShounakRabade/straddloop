@@ -8,11 +8,11 @@ export const unitWord = (r: RunResult, n = 1) => (r.unit === 'day' ? (n === 1 ? 
 
 /** One plain-language reading of a run: what the interval does and does not allow you to say. */
 export function verdict(r: RunResult): { head: string; body: string } {
-  const [lo, hi] = r.ci, range = `${inr(lo, { sign: true })} to ${inr(hi, { sign: true })}`;
+  const [lo, hi] = r.ci ?? [r.avg, r.avg], range = `${inr(lo, { sign: true })} to ${inr(hi, { sign: true })}`;
   const sample = r.data ? 'these real NIFTY days' : 'this synthetic sample';
   const fills = r.data ? ' Fills come from 1-minute candles with no bid/ask, so real trading would likely do worse.' : '';
   if (!r.traded) return { head: 'No trades were taken.', body: 'With these settings the entry rule never passed. Loosen a filter or lengthen the sample.' };
-  if (r.traded < 2) return { head: 'One trade is not evidence.', body: `Widen the date range: a single ${unitWord(r)} cannot show whether the rule has an edge.${fills}` };
+  if (r.traded < 2 || !r.ci) return { head: 'One trade is not evidence.', body: `Widen the date range: a single ${unitWord(r)} cannot show whether the rule has an edge.${fills}` };
   if (lo > 0) return { head: `Positive on ${sample}, and the range stays above zero.`, body: `The average ${unitWord(r)} sits between ${range} with 95% confidence.${r.data ? ' Check a different period before believing it.' : " That is a property of the model's assumptions until real data agrees. Try another market seed before believing it."}${fills}` };
   if (hi < 0) return { head: `A reliable loss on ${sample}.`, body: `The average ${unitWord(r)} sits between ${range} with 95% confidence. The whole range is below zero, so this is not bad luck in the sample.${fills}` };
   return { head: 'This run cannot tell profit from luck.', body: `The average ${unitWord(r)} sits between ${range} with 95% confidence. The range includes zero, so a different ${r.sessions} ${r.unit === 'month' ? 'stock-months' : 'sessions'} could show the opposite sign.${fills}` };
@@ -22,7 +22,7 @@ export function Kpis({ r }: { r: RunResult }) {
   return (
     <div className="kpis">
       <div className="kpi kpi--lead"><span className="label">Net after costs</span><span className={`v ${tone(r.net)}`}><CountUp value={r.net} format={(v) => inr(v, { sign: true })} /></span><span className="s">Gross {inr(r.gross, { sign: true })}</span></div>
-      <div className="kpi"><span className="label">Average {unitWord(r)}</span><span className={`v ${tone(r.avg)}`}><CountUp value={r.avg} format={(v) => inr(v, { sign: true })} /></span><span className="s">95% range {inr(r.ci[0], { sign: true })} to {inr(r.ci[1], { sign: true })}</span></div>
+      <div className="kpi"><span className="label">Average {unitWord(r)}</span><span className={`v ${tone(r.avg)}`}><CountUp value={r.avg} format={(v) => inr(v, { sign: true })} /></span><span className="s">{r.ci ? <>95% range {inr(r.ci[0], { sign: true })} to {inr(r.ci[1], { sign: true })}</> : 'One observation has no range'}</span></div>
       <div className="kpi"><span className="label">Won</span><span className="v"><CountUp value={r.winRate} format={(v) => pct(v)} /></span><span className="s">of {r.traded} {unitWord(r, r.traded)}</span></div>
       <div className="kpi"><span className="label">Deepest drawdown</span><span className="v loss"><CountUp value={r.maxDD} format={(v) => inr(v)} /></span><span className="s">Worst single {r.unit} {inr(r.worst)}</span></div>
       <div className="kpi"><span className="label">Costs paid</span><span className="v"><CountUp value={r.costs} format={(v) => inr(v)} /></span><span className="s">Already inside net</span></div>
