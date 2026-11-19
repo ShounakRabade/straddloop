@@ -75,10 +75,44 @@
         winRate: perf.win_rate_pct || 0, profitFactor: perf.profit_factor, worst: perf.largest_loss || 0, best: perf.largest_win || 0 });
     }
     head.account = { config: led.acct, report: rep, daily: led.daily, rejections: led.rejections, liquidations: led.liquidations, counts: { trades: led.tradebook.length, fills: led.fills.length } };
+    head.days = dayOutcomes(results, led, sessions, last && last.cfg);
     return head;
   }
 
   let last = null;  // the latest run's per-day results, for the day replay
+
+  const hmS = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+  /** Index minutes with no bar between `from` (inclusive) and `to` (exclusive), as HH:MM. */
+  function missingIndexBars(s, from, to) {
+    const out = [];
+    for (let t = from; t < to; t++) { const i = s.times.indexOf(t); if (i < 0 || s.und.o[i] == null) out.push(hmS(t)); }
+    return out;
+  }
+  /** Words for why a day did not trade, with the data detail the engine reason leaves out. */
+  function explain(r, s, cfg) {
+    const why = r.reason || '';
+    if (s && cfg && /incomplete opening range|entry candle missing|no execution bar/.test(why)) {
+      const open = 555, end = open + (cfg.or_minutes || 30) + (cfg.candle_minutes || 5) + 1;
+      const miss = missingIndexBars(s, open, end);
+      if (miss.length) return `${why}: index bar${miss.length > 1 ? 's' : ''} ${miss.slice(0, 4).join(', ')}${miss.length > 4 ? ` and ${miss.length - 4} more` : ''} missing`;
+    }
+    return why || null;
+  }
+  /**
+   * One outcome per session handed to the engine (docs/ENGINE_INTERFACES.md §2): traded / no_entry / filtered /
+   * excluded / rejected, with the reason and that day's ledger net. Its length is the run's day count, so the
+   * page can never say "3 days ran" and show 1 without saying what happened to the other 2.
+   */
+  function dayOutcomes(results, led, sessions, cfg) {
+    const daily = new Map(led.daily.map(d => [d.date, d]));
+    const byDate = new Map((sessions || []).map(s => [s.date, s]));
+    return results.slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)).map(r => {
+      const d = daily.get(r.date);
+      let status = r.status, reason = r.status === 'traded' ? null : explain(r, byDate.get(r.date), cfg);
+      if (status === 'traded' && d && d.trades === 0 && d.rejected > 0) { status = 'rejected'; reason = `every order was refused for margin (${d.rejected})`; }
+      return { date: r.date, status, reason, opened: d ? d.trades : 0, closed: d ? d.trades : 0, net: d ? d.net_realised : 0 };
+    });
+  }
 
   function straddle(p, sessions) {
     const cfg = E.makeConfig(Object.assign({
@@ -96,7 +130,7 @@
       ci: m.ci95_mean || [m.avg_daily_pnl || 0, m.avg_daily_pnl || 0], t: m.t_stat_mean,
       winRate: m.win_rate, maxDD: m.max_drawdown, worst: m.largest_loss, best: m.largest_win,
       profitFactor: m.profit_factor, exits,
-      curve: m.equity_curve.map(e => ({ d: e.date, v: e.cum, p: e.pnl })),
+      curve: (m.equity_curve || []).map(e => ({ d: e.date, v: e.cum, p: e.pnl })),
       extra: [
         ['Days with no entry', `${m.sessions_total - m.sessions_traded} of ${m.sessions_total}`],
         ['Average winning day', m.avg_win], ['Average losing day', m.avg_loss],
@@ -121,7 +155,7 @@
       ci: [lo || 0, hi || 0], t: m.trade_t_stat,
       winRate: m.trade_win_rate, maxDD: m.max_drawdown, worst: m.largest_loss, best: m.largest_win,
       profitFactor: m.trade_profit_factor, exits: m.trade_exit_reasons || {},
-      curve: m.equity_curve.map(e => ({ d: e.date, v: e.cum, p: e.pnl })),
+      curve: (m.equity_curve || []).map(e => ({ d: e.date, v: e.cum, p: e.pnl })),
       extra: [
         ['Average hold', `${Math.round(m.avg_hold_min || 0)} min`],
         ['Best open gain, average', m.avg_mfe], ['Worst open loss, average', m.avg_mae],
@@ -203,5 +237,5 @@
     return { kind, total: rows.length, offset, rows: rows.slice(offset, offset + limit) };
   }
 
-  return { run: (p, sessions) => ({ straddle, orb, fourleg })[p.strategy](p, sessions), scenarios, replay, exportCsv, inspect };
+  return { run: (p, sessions) => ({ straddle, orb, fourleg })[p.strategy](p, sessions), scenarios, replay, exportCsv, inspect, dayOutcomes };
 });
