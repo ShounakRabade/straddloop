@@ -69,3 +69,7 @@ Validated candles go to `data/store/` as Parquet. Reports go to `data/reports/`.
 browser lab on synthetic data, onboarding and a notebook of saved runs. See `web/README.md` for
 local setup, the Supabase schema and Vercel deployment. Every figure on the site is synthetic and
 nothing on it is investment advice.
+
+## Backtest accounting
+
+The Lab runs every straddle and ORB backtest through a fill-by-fill ledger (capital, estimated margin, dated statutory charges, realised/unrealised P&L) and produces a reconciled report with CSV exports. Rules, audit findings and per-feature status: `docs/ACCOUNTING.md`. Tests: `cd web && npm test`; browser journey: `web/tests/e2e/journey.cjs`.

@@ -5,6 +5,8 @@ import { Button, SyntheticNote, hard } from '@/components/ui';
 import { ParamFields } from '@/components/ParamFields';
 import { Curve, Exits, Kpis, verdict } from '@/components/ResultView';
 import { ReplayPanel } from '@/components/Replay';
+import { ReportPanel } from '@/components/Report';
+import { checkRange } from '@/lib/range';
 import { STRATEGIES, SYNTHETIC_KEYS, bySlug, describeParams } from '@/lib/strategies';
 import { useLab, type DayRef } from '@/lib/useLab';
 import { saveRun } from '@/lib/store';
@@ -89,13 +91,22 @@ export function LabClient() {
     return () => { live = false; };
   }, [real, flag, local]);
 
-  const chosen = useMemo((): { path: string; date: string }[] => {
-    if (!real) return [];
-    const inRange = (d: string) => (!range.from || d >= range.from) && (!range.to || d <= range.to);
-    if (local) return local.filter((d) => inRange(d.date));
-    if (avail?.state === 'ready') return avail.days.filter((d) => inRange(d.trade_date)).map((d) => ({ path: d.path, date: d.trade_date }));
-    return [];
+  // Which stored days exist for the chosen dates, and whether the dates themselves make sense.
+  const check = useMemo(() => {
+    if (!real) return null;
+    const stored = local ? local.map((d) => ({ trade_date: d.date, quality: 'complete' }))
+      : avail?.state === 'ready' ? avail.days.map((d) => ({ trade_date: d.trade_date, quality: d.quality })) : null;
+    if (!stored && !(range.from && range.to)) return null;
+    return checkRange(range.from, range.to, stored ?? []);
   }, [real, local, avail, range]);
+
+  const chosen = useMemo((): { path: string; date: string }[] => {
+    if (!real || !check || check.errors.length) return [];
+    const inSet = new Set(check.stored);
+    if (local) return local.filter((d) => inSet.has(d.date));
+    if (avail?.state === 'ready') return avail.days.filter((d) => inSet.has(d.trade_date) && d.quality !== 'empty').map((d) => ({ path: d.path, date: d.trade_date }));
+    return [];
+  }, [real, local, avail, check]);
 
   const runReal = useCallback(async (p: Params) => {
     if (!chosen.length) return;
@@ -134,7 +145,7 @@ export function LabClient() {
   const fields = useMemo(() => (real ? strategy.fields.filter((f) => !SYNTHETIC_KEYS.includes(f.key)) : strategy.fields), [real, strategy]);
   const changed = useMemo(() => describeParams({ ...strategy, fields }, params), [strategy, fields, params]);
   const r0 = lab.result && lab.result.strategy === slug ? lab.result : null;
-  const r = r0 && (real ? !!r0.data : !r0.data) ? r0 : null;
+  const r = r0 && (real ? !!r0.data && chosen.length > 0 : !r0.data) ? r0 : null;  // never show an old result under a range that cannot run
   const busy = lab.status === 'running' || !booted || !!loading;
   const v = r ? verdict(r) : null;
   const sampleText = real ? (r?.data ? `${r.data.days} real days` : 'real days')
@@ -219,7 +230,15 @@ export function LabClient() {
                       <label className="field"><span className="flabel small">To</span>
                         <input className="input input--sm" type="date" value={range.to} onChange={(e) => setRange((x) => ({ ...x, to: e.target.value }))} /></label>
                     </div>
-                    <p className="help">{chosen.length} trading day{chosen.length === 1 ? '' : 's'} selected · stored {shortDate(span.min)} to {shortDate(span.max)}{local ? ' · from files on this computer' : ''}</p>
+                    {check && check.errors.map((e) => <p key={e} className="error small" role="alert">{e}</p>)}
+                    {check && !check.errors.length && (
+                      <div className="range-status" aria-live="polite">
+                        <div><b>{check.counts.stored}</b> stored locally · <b>{check.counts.validated}</b> validated{check.counts.gaps ? <> · <b>{check.counts.gaps}</b> with gaps</> : null}{check.counts.failed ? <> · <b>{check.counts.failed}</b> failed validation</> : null} · <b>{check.counts.notStored}</b> not stored</div>
+                        {loading && <div><span className="status" data-state="running"><i />Downloading {loading.done} of {loading.total}</span></div>}
+                        {check.notes.map((m) => <div key={m} className="muted">{m}</div>)}
+                      </div>
+                    )}
+                    <p className="help">{chosen.length} trading day{chosen.length === 1 ? '' : 's'} will run · stored {shortDate(span.min)} to {shortDate(span.max)}{local ? ' · from files on this computer' : ''}</p>
                     {!local && range.from && range.to && (range.from < span.min || range.to > span.max) && (
                       <div className="small stack" style={{ ['--gap' as string]: '6px' }}>
                         <p>Some of these dates are not stored yet. Run this on your computer, then come back and rerun:</p>
@@ -234,7 +253,7 @@ export function LabClient() {
                     </label>
                   </>
                 )}
-                {loading && <p className="small"><span className="status" data-state="running"><i />Downloading {loading.done} of {loading.total} days</span></p>}
+                {loading && !check && <p className="small"><span className="status" data-state="running"><i />Downloading {loading.done} of {loading.total} days</span></p>}
                 {dataErr && <p className="error small" role="alert">{dataErr}</p>}
                 <div className="small">
                   {local
@@ -258,7 +277,7 @@ export function LabClient() {
             <div className="sheet sheet-pad stack" {...hard}>
               <h2 className="h3">The simulation stopped</h2>
               <p className="error">{lab.error}</p>
-              <p className="muted">Reset the settings and it will run again.</p>
+              <p className="muted">{/cost schedule/i.test(lab.error ?? '') ? 'Costs are charged at the rates in force on each trade date, and the table starts on 1 Jul 2020. Choose a later start date.' : 'Reset the settings and it will run again.'}</p>
               <div><Button onClick={() => setParams(strategy.defaults)}>Reset to defaults</Button></div>
             </div>
           )}
@@ -293,6 +312,8 @@ export function LabClient() {
                 <h2 className="h3">{v.head}</h2>
                 <p className="muted" style={{ marginTop: 6 }}>{v.body}</p>
               </div>
+
+              <div className="fade-busy"><ReportPanel r={r} lab={lab} /></div>
 
               {r.strategy !== 'fourleg' && r.curve.length > 0 && <div className="fade-busy"><ReplayPanel r={r} load={lab.replay} /></div>}
 

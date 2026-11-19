@@ -18,6 +18,7 @@
     reentry_after_second_stop: false, reentry_eval: 'every_bar', reentry_cutoff: '14:30', min_reentry_premium: 0.0,
     use_quotes: true, slip_pct: 0.5, slip_ticks: 1, stop_slip_mult: 2.0,
     brokerage_per_order: 20.0, stt_sell_pct: 0.1, exch_pct: 0.03503, sebi_pct: 0.0001, stamp_buy_pct: 0.003, gst_pct: 18.0,
+    rates_for: null,  // optional (date) => { stt_sell_pct, exch_pct, ... }: dated statutory rates (ledger.js); null keeps the flat rates above
     skip_expiry_day: false, min_or_width_pct: 0.0, max_or_width_pct: 100.0, max_entry_spread_pct: 100.0,
     min_iv_proxy: 0.0, max_iv_proxy: 1000.0, weekdays: [0, 1, 2, 3, 4],
   };
@@ -134,7 +135,11 @@
     return ks.filter(k => SIDES.every(sd => { const c = ex.contracts[sd + ':' + k]; return c && c.o[i] != null; }));
   }
 
-  function simulate(s, cfg) {
+  /** Applies the dated statutory rates for one session's date when a rates_for hook is set. */
+  function rated(cfg, date) { return cfg.rates_for ? Object.assign({}, cfg, cfg.rates_for(date)) : cfg; }
+
+  function simulate(s, cfg0) {
+    const cfg = rated(cfg0, s.date);
     const bm = s.bar_minutes, cm = cfg.candle_minutes, orm = cfg.or_minutes;
     const openM = hm(cfg.session_open), exitM = hm(cfg.exit_time), cutoffM = hm(cfg.reentry_cutoff), tick = cfg.tick;
     const res = { date: s.date, symbol: s.symbol, source: s.source || '?', status: 'excluded', reason: null, flags: [],
@@ -355,7 +360,7 @@
 
   function mtm(ctx, i) {
     const cfg = ctx.cfg, ex = ctx.ex;
-    const out = { net: 0, gross: 0, initial_net: 0, realized: 0, unrealized: 0, worst: 0, best: 0 };
+    const out = { net: 0, gross: 0, initial_net: 0, realized: 0, unrealized: 0, worst: 0, best: 0, px: {} };
     for (const lg of ctx.legs) {
       let g, net, worst, best, exitC = 0;
       if (lg.open) {
@@ -367,6 +372,7 @@
         worst = (lg.entry_px - hi) * lg.qty;
         best = (lg.entry_px - lo) * lg.qty;
         out.unrealized += g;
+        out.px[lg.id] = lg.last_px;  // per-leg mark for the ledger
         net = g - lg.cost - exitC;
       } else {
         g = (lg.entry_px - lg.exit_px) * lg.qty;
@@ -806,6 +812,7 @@
     max_trades: 1, allow_same_dir: false, allow_opposite_dir: false, max_consecutive_losses: 0, max_loss_per_lot: 0.0,
     use_quotes: true, slip_pct: 0.5, slip_ticks: 1, stop_slip_mult: 2.0,
     brokerage_per_order: 20.0, stt_sell_pct: 0.1, exch_pct: 0.03503, sebi_pct: 0.0001, stamp_buy_pct: 0.003, gst_pct: 18.0,
+    rates_for: null,
     skip_expiry_day: false, min_or_width_pct: 0.0, max_or_width_pct: 100.0, min_gap_pct: -100.0, max_gap_pct: 100.0,
     max_or_width_rel: 0.0, or_avg_lookback: 10, weekdays: [0, 1, 2, 3, 4],
   };
@@ -887,8 +894,9 @@
   }
   const ckey = (cp, k) => cp + ':' + k;
 
-  function orbSimulate(s, cfg, ctx) {
+  function orbSimulate(s, cfg0, ctx) {
     ctx = ctx || {};
+    const cfg = rated(cfg0, s.date);
     const bm = s.bar_minutes, cm = cfg.candle_minutes, orm = cfg.or_minutes;
     const openM = hm(cfg.session_open), exitM = hm(cfg.exit_time), lastEntry = hm(cfg.latest_entry), tick = cfg.tick;
     const res = { date: s.date, symbol: s.symbol, source: s.source || '?', strategy: 'orb', status: 'excluded', reason: null,
@@ -1102,7 +1110,7 @@
         unreal = (p.last_px - p.entry_px) * p.qty - p.cost - fillCost('SELL', p.last_px, p.qty, cfg).total;
       }
       const netNow = realizedNet + unreal;
-      mtm.push({ t: t + bm, net: netNow, pos: !!p, px: p ? p.last_px : null });
+      mtm.push({ t: t + bm, net: netNow, pos: !!p, px: p ? p.last_px : null, id: p ? p.id : null });
       if (p && cfg.max_loss_per_lot > 0 && netNow <= -cfg.max_loss_per_lot * cfg.lots && !st.pending) {
         st.pending = { type: 'sell', reason: 'max_loss' }; st.done = true; st.doneReason = 'daily loss limit';
         ev(t + bm, 'max_loss', `daily loss limit hit (₹${fmtInt(netNow)}); sell at next open`);

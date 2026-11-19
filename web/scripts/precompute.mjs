@@ -5,9 +5,10 @@ import { writeFileSync } from 'node:fs';
 const require = createRequire(import.meta.url);
 const E = require('../public/engine/engine.js');
 const F = require('../public/engine/fourleg_engine.js');
-const compute = require('../public/engine/compute.js')(E, F);
+const L = require('../public/engine/ledger.js');
+const compute = require('../public/engine/compute.js')(E, F, L);
 const round = (k, v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v);
-const thin = (r, n = 120) => {
+const thin = ({ account, ...r }, n = 120) => {
   const step = Math.max(1, Math.ceil(r.curve.length / n));
   return { ...r, curve: r.curve.filter((_, i) => i % step === 0 || i === r.curve.length - 1) };
 };

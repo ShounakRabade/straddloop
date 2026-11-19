@@ -2,8 +2,8 @@
  * Messages: { id, params } runs on synthetic data; { id, params, days } runs on real day files,
  * where `days` lists { path, buf? }. Day files are decoded once and kept here, so changing a
  * setting does not download or unpack anything again. { id, replay: date } returns one day's detail. */
-importScripts('/engine/engine.js', '/engine/fourleg_engine.js', '/engine/compute.js', '/engine/dayfile.js');
-const compute = self.makeStraddloopCompute(self.StraddleEngine, self.FourLegEngine);
+importScripts('/engine/engine.js', '/engine/fourleg_engine.js', '/engine/ledger.js', '/engine/compute.js', '/engine/dayfile.js');
+const compute = self.makeStraddloopCompute(self.StraddleEngine, self.FourLegEngine, self.StraddloopLedger);
 const D = self.StraddloopDayFile;
 const docs = new Map(); // path -> Promise of the decoded day-file JSON (set synchronously, so overlapping runs share it)
 
@@ -19,8 +19,10 @@ async function sessionsFor(days, params) {
 }
 
 self.onmessage = async (ev) => {
-  const { id, params, days, replay } = ev.data;
+  const { id, params, days, replay, exportKind, inspect } = ev.data;
   try {
+    if (exportKind) { self.postMessage({ id, ok: true, csv: compute.exportCsv(exportKind) }); return; }
+    if (inspect) { self.postMessage({ id, ok: true, page: compute.inspect(inspect.kind, inspect.offset, inspect.limit) }); return; }
     if (replay) { self.postMessage({ id, ok: true, replay: compute.replay(replay) }); return; }
     const t0 = Date.now();
     let result;

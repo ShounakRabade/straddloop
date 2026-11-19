@@ -22,6 +22,8 @@ export interface RunResult {
   exits: Record<string, number>;
   curve: { d: string; v: number; p: number }[];
   extra: [string, string | number][];
+  /** The financial ledger and report for the run (straddle and ORB). Absent for the four-leg stock model. */
+  account?: Account;
   /** Present when the run used real day files instead of the synthetic model. */
   data?: { source: 'dhan'; from: string; to: string; days: number; lot_sizes: number[]; lot_source: string; expiry_source: string; flags: string[] };
 }
@@ -55,3 +57,33 @@ export interface Profile {
   first_strategy: StrategySlug | null;
   acknowledged_at: string | null;
 }
+
+export type Num = number | null;
+export interface DailyRow {
+  date: string; status: string; opening_balance: number; trades: number; rejected: number; fills: number; gross_realised: number; charges: number; net_realised: number;
+  closing_balance: number; peak_margin: number; peak_deployed: number; peak_exposure: number; min_available: Num; peak_util_pct: number; intraday_low_equity: number; drawdown: number; drawdown_pct: number;
+  lot_size: Num; exit_reason: string; reason: string; flags: string;
+}
+export interface Report {
+  generated: { cost_table_version: string; engine_config_hash: string | null; data_fingerprint: string | null; account_hash: string; run_hash: string | null };
+  warnings: string[];
+  defs: Record<string, string>;
+  range: { from: string | null; to: string | null; sessions: number; traded_days: number; excluded_days: { date: string; reason: string }[] };
+  cost_rates: { id: string; effective_from: string; stt_sell_pct: number; exch_pct: number; sebi_pct: number; stamp_buy_pct: number; gst_pct: number; verified: Record<string, boolean>; source: string }[];
+  capital: Record<string, Num>;
+  margin: Record<string, Num | string | { kind: string; span_pct: number; exposure_pct: number; base: string; long_options: string }>;
+  pnl: Record<string, Num | Record<string, number>>;
+  returns: { absolute: number; pct_initial: Num; pct_peak_deployed: Num; pct_avg_deployed: Num; pct_peak_margin: Num; cagr_pct: Num; cagr_note: string | null; monthly: Record<string, number>; annual: Record<string, number> };
+  performance: Record<string, Num | number[]>;
+  risk: Record<string, Num | string>;
+  reconciliation: { ok: boolean; checks: { name: string; a: number; b: number; ok: boolean }[] };
+}
+export interface Account {
+  config: { initial_capital: number; margin_policy: string };
+  report: Report; daily: DailyRow[];
+  rejections: { date: string; time: string; leg: number; side: string; strike: number; required: number; available: number; shortfall: number; policy: string }[];
+  liquidations: { date: string; time: string; leg: number; side: string; strike: number; mark_px: number }[];
+  counts: { trades: number; fills: number };
+}
+export type LedgerRow = Record<string, string | number | boolean | null>;
+export type ExportKind = 'tradebook' | 'ledger' | 'daily' | 'performance';
