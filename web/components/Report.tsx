@@ -13,6 +13,7 @@ type Lab = {
 type Tab = 'summary' | 'capital' | 'performance' | 'trades' | 'risk' | 'ledger';
 const TABS: [Tab, string][] = [['summary', 'Summary'], ['capital', 'Capital & margin'], ['performance', 'Performance'], ['trades', 'Trades'], ['risk', 'Risk'], ['ledger', 'Ledger']];
 const PAGE = 25;
+export type { Lab as ReportLab };
 
 type Row = [label: string, value: string, note?: string, est?: boolean];
 function Rows({ rows }: { rows: Row[] }) {
@@ -33,14 +34,14 @@ function Rows({ rows }: { rows: Row[] }) {
 const n = (v: unknown) => (typeof v === 'number' ? v : null);
 const money = (v: unknown, sign = false) => inr2(n(v), { sign });
 
-function downloadText(name: string, text: string) {
+export function downloadText(name: string, text: string) {
   const url = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }));
   const a = document.createElement('a');
   a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function Warnings({ rep }: { rep: Report }) {
+export function Warnings({ rep }: { rep: Report }) {
   return (
     <ul className="rep-warn" aria-label="Limits of this run">
       {rep.warnings.map((w) => <li key={w}>{w}</li>)}
@@ -48,7 +49,7 @@ function Warnings({ rep }: { rep: Report }) {
   );
 }
 
-function Summary({ rep }: { rep: Report }) {
+export function Summary({ rep }: { rep: Report }) {
   const c = rep.capital, p = rep.pnl, rt = rep.returns, pf = rep.performance, rk = rep.risk;
   const ch = p.charges as Record<string, number>;
   return (
@@ -70,7 +71,7 @@ function Summary({ rep }: { rep: Report }) {
   );
 }
 
-function Capital({ rep }: { rep: Report }) {
+export function Capital({ rep }: { rep: Report }) {
   const c = rep.capital, m = rep.margin, d = rep.defs;
   const mod = m.model as { span_pct: number; exposure_pct: number; base: string; long_options: string };
   return (
@@ -108,7 +109,7 @@ function Capital({ rep }: { rep: Report }) {
   );
 }
 
-function Performance({ rep }: { rep: Report }) {
+export function Performance({ rep }: { rep: Report }) {
   const rt = rep.returns, pf = rep.performance, d = rep.defs;
   const months = Object.entries(rt.monthly), years = Object.entries(rt.annual);
   return (
@@ -144,7 +145,7 @@ function Performance({ rep }: { rep: Report }) {
   );
 }
 
-function Risk({ rep }: { rep: Report }) {
+export function Risk({ rep }: { rep: Report }) {
   const rk = rep.risk, d = rep.defs, p = rep.pnl;
   return (
     <div className="stack" style={{ ['--gap' as string]: '14px' }}>
@@ -163,7 +164,7 @@ function Risk({ rep }: { rep: Report }) {
   );
 }
 
-function CostTable({ rep }: { rep: Report }) {
+export function CostTable({ rep }: { rep: Report }) {
   return (
     <div className="stack" style={{ ['--gap' as string]: '8px' }}>
       <h3 className="rep-h">Statutory rates used (by trade date)</h3>
@@ -236,7 +237,7 @@ function Rowsets({ lab, kind, rev }: { lab: Lab; kind: 'tradebook' | 'ledger' | 
   );
 }
 
-function LedgerTab({ rep, lab, rev }: { rep: Report; lab: Lab; rev: string }) {
+export function LedgerTab({ rep, lab, rev }: { rep: Report; lab: Lab; rev: string }) {
   const [view, setView] = useState<'ledger' | 'daily'>('ledger');
   return (
     <div className="stack" style={{ ['--gap' as string]: '14px' }}>

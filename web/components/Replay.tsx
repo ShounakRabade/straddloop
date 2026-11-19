@@ -56,16 +56,16 @@ function DayChart({ d, upto }: { d: ReplayData; upto: number }) {
   );
 }
 
-export function ReplayPanel({ r, load }: { r: RunResult; load: (date: string) => Promise<ReplayData | null> }) {
+export function ReplayPanel({ r, load, initialDate, bare = false }: { r: RunResult; load: (date: string) => Promise<ReplayData | null>; initialDate?: string; bare?: boolean }) {
   const dates = useMemo(() => r.curve.map((p) => p.d), [r]);
   const firstTraded = useMemo(() => r.curve.find((p) => p.p !== 0)?.d ?? dates[0], [r, dates]);
-  const [date, setDate] = useState<string>(firstTraded);
+  const [date, setDate] = useState<string>(initialDate && dates.includes(initialDate) ? initialDate : firstTraded);
   const [d, setD] = useState<ReplayData | null>(null);
   const [upto, setUpto] = useState(CLOSE);
   const [playing, setPlaying] = useState(false);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  useEffect(() => { setDate(firstTraded); }, [firstTraded]);
+  useEffect(() => { if (!initialDate || !dates.includes(initialDate)) setDate(firstTraded); }, [firstTraded, initialDate, dates]);
   useEffect(() => {
     let live = true;
     setPlaying(false);
@@ -86,7 +86,7 @@ export function ReplayPanel({ r, load }: { r: RunResult; load: (date: string) =>
   const events = d ? d.events.filter((e) => e.t <= upto) : [];
 
   return (
-    <div className="sheet" {...hard}>
+    <div className={bare ? 'replay-bare' : 'sheet'} {...(bare ? {} : hard)}>
       <div className="chart-sheet-head">
         <span className="label">Replay a day</span>
         <div className="row" style={{ gap: 8 }}>
