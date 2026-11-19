@@ -2,8 +2,8 @@
  * Messages: { id, params } runs on synthetic data; { id, params, days } runs on real day files,
  * where `days` lists { path, buf? }. Day files are decoded once and kept here, so changing a
  * setting does not download or unpack anything again. { id, replay: date } returns one day's detail. */
-importScripts('/engine/engine.js', '/engine/fourleg_engine.js', '/engine/ledger.js', '/engine/compute.js', '/engine/dayfile.js', '/engine/analytics.js');
-const compute = self.makeStraddloopCompute(self.StraddleEngine, self.FourLegEngine, self.StraddloopLedger);
+importScripts('/engine/engine.js', '/engine/fourleg_engine.js', '/engine/ledger.js', '/engine/legs.js', '/engine/compute.js', '/engine/dayfile.js', '/engine/analytics.js');
+const compute = self.makeStraddloopCompute(self.StraddleEngine, self.FourLegEngine, self.StraddloopLedger, self.StraddloopLegs);
 const D = self.StraddloopDayFile;
 const A = self.StraddloopAnalytics;
 let lastData = null;          // result.data of the latest run (null = synthetic)
@@ -18,7 +18,7 @@ async function sessionsFor(days, params) {
     const doc = await docs.get(d.path);
     out.push(D.toSession(doc, { lotSize: Number(params.lot_size) || 0 }));
   }
-  return out.sort((a, b) => (a.date < b.date ? -1 : 1));
+  return D.mergeSessions(out);
 }
 
 /**
@@ -81,6 +81,7 @@ self.onmessage = async (ev) => {
     }
     self.postMessage({ id, ok: true, result, ms: Date.now() - t0 });
   } catch (err) {
-    self.postMessage({ id, ok: false, error: String((err && err.message) || err) });
+    // a gated leg-engine spec carries its gates (docs/ENGINE_INTERFACES.md §1), so the Lab can show each one
+    self.postMessage({ id, ok: false, error: String((err && err.message) || err), gates: (err && err.gates) || null });
   }
 };

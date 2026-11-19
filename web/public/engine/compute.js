@@ -3,7 +3,7 @@
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory;
   else root.makeStraddloopCompute = factory;
-})(typeof self !== 'undefined' ? self : this, function (E, F, L) {
+})(typeof self !== 'undefined' ? self : this, function (E, F, L, G) {
   const cache = new Map();
   function memo(key, make) {
     if (!cache.has(key)) { if (cache.size > 6) cache.delete(cache.keys().next().value); cache.set(key, make()); }
@@ -29,7 +29,7 @@
   function accountOf(p) {
     const a = {};
     const map = { capital: 'initial_capital', margin_policy: 'margin_policy', margin_span_pct: 'margin_span_pct', margin_exposure_pct: 'margin_exposure_pct',
-      brokerage_per_order: 'brokerage_per_order', risk_free_pct: 'risk_free_pct' };
+      brokerage_per_order: 'brokerage_per_order', risk_free_pct: 'risk_free_pct', margin_model: 'margin_model' };
     for (const k of Object.keys(map)) if (p[k] !== undefined && p[k] !== '') a[map[k]] = p[k];
     return a;
   }
@@ -54,9 +54,9 @@
 
   /** Runs the ledger over a run's results and rewrites the headline figures from it, so the page, the report
    *  and the CSVs all come from one source. Returns the extra fields for the result. */
-  function withLedger(strategy, results, engineCfgHash, p, sessions, base) {
+  function withLedger(strategy, results, engineCfgHash, p, sessions, base, acctOver) {
     const info = { symbol: sessions && sessions[0] ? sessions[0].symbol : 'NIFTY', engine_cfg_hash: engineCfgHash, data_fingerprint: sessions ? fingerprint(sessions) : 'synthetic:' + L.hashStr(JSON.stringify([p.days, p.seed, p.iv])) };
-    const led = L.runLedger(results, accountOf(p), info);
+    const led = L.runLedger(results, acctOver || accountOf(p), info);
     const rep = led.report;
     rep.generated.run_hash = L.hashStr([engineCfgHash, rep.generated.account_hash, info.data_fingerprint, L.COST_TABLE_VERSION].join('|'));
     last.ledger = led;
@@ -112,8 +112,10 @@
     return results.slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)).map(r => {
       const d = daily.get(r.date);
       let status = r.status, reason = r.status === 'traded' ? null : explain(r, byDate.get(r.date), cfg);
-      if (status === 'traded' && d && d.trades === 0 && d.rejected > 0) { status = 'rejected'; reason = `every order was refused for margin (${d.rejected})`; }
-      return { date: r.date, status, reason, opened: d ? d.trades : 0, closed: d ? d.trades : 0, net: d ? d.net_realised : 0 };
+      if (status === 'traded' && d && d.fills === 0 && d.rejected > 0) { status = 'rejected'; reason = `every order was refused for margin (${d.rejected})`; }
+      const fl = r.status === 'traded' || r.status === 'holding' ? (r.fills || []) : [];
+      const opened = fl.filter(f => f.reason === 'entry' || f.reason === 're-entry').length;
+      return { date: r.date, status, reason, opened, closed: fl.length - opened, net: d ? d.net_realised : 0 };
     });
   }
 
@@ -214,6 +216,56 @@
     };
   }
 
+  /**
+   * The leg engine (docs/ENGINE_INTERFACES.md): any strategy as a StrategySpec in p.spec. Headline figures are per
+   * POSITION (the legs opened together), taken from the ledger's tradebook grouped by position.
+   */
+  function legsStrategy(p, sessions) {
+    if (!G) throw new Error('The leg engine is not loaded.');
+    const raw = typeof p.spec === 'string' ? JSON.parse(p.spec) : p.spec;
+    if (!raw) throw new Error('No strategy spec was given.');
+    const spec = G.normalize(raw);
+    // The account owns brokerage; the engine's cost lines must use the same figure so the two reconcile.
+    if (p.brokerage_per_order !== undefined && p.brokerage_per_order !== '') spec.execution.brokerage_per_order = Number(p.brokerage_per_order);
+    const sess = sessions || calendar(p);
+    const run = G.run(sess, spec, { L, caps: G.capsOf(sess) });
+    last = { strategy: 'legs', results: run.results, cfg: { or_minutes: 30, candle_minutes: 5 }, positions: run.positions, sessions: sess, params: p };
+    const acct = Object.assign({ margin_model: 'hedged' }, accountOf(p), { brokerage_per_order: spec.execution.brokerage_per_order, exercise_stt_pct: spec.execution.exercise_stt_pct });
+    const exits = {};
+    run.positions.forEach(x => { exits[x.exit_reason] = (exits[x.exit_reason] || 0) + 1; });
+    const head = withLedger('legs', run.results, run.config_hash, p, sessions, {
+      strategy: 'legs', unit: 'position', sessions: run.results.length, traded: 0, net: 0, gross: 0, costs: 0, avg: 0, ci: [0, 0], t: null,
+      winRate: 0, maxDD: 0, worst: 0, best: 0, profitFactor: null, exits, curve: [], extra: [],
+    }, acct);
+    // per-position figures from the ledger (what was actually booked, after any margin rejection)
+    const tb = last.ledger.tradebook, byPos = new Map();
+    for (const t of tb) { const k = t.position_id || '?'; const o = byPos.get(k) || { net: 0, gross: 0, charges: 0, legs: 0 }; o.net += t.net_pnl; o.gross += t.gross_pnl; o.charges += t.charges; o.legs++; byPos.set(k, o); }
+    const nets = run.positions.filter(x => byPos.has(x.id)).map(x => byPos.get(x.id).net);
+    const n = nets.length, mean = n ? sumN(nets) / n : 0, sd = sdOf(nets);
+    const wins = nets.filter(x => x > 0), loss = nets.filter(x => x <= 0);
+    Object.assign(head, {
+      traded: n, avg: mean, ci: n > 1 ? [mean - 1.96 * sd / Math.sqrt(n), mean + 1.96 * sd / Math.sqrt(n)] : [mean, mean], t: n > 1 && sd > 0 ? mean / (sd / Math.sqrt(n)) : null,
+      winRate: n ? 100 * wins.length / n : 0, profitFactor: loss.length && sumN(loss) < 0 ? sumN(wins) / -sumN(loss) : null,
+      worst: n ? Math.min(...nets) : 0, best: n ? Math.max(...nets) : 0,
+      extra: [
+        ['Days with no entry', `${run.results.filter(r => ['no_entry', 'filtered', 'excluded'].includes(r.status)).length} of ${run.results.length}`],
+        ['Average winning position', wins.length ? sumN(wins) / wins.length : 0], ['Average losing position', loss.length ? sumN(loss) / loss.length : 0],
+        ['Costs per position', n ? head.costs / n : 0],
+      ],
+    });
+    // engine and ledger must agree on every position when the ledger executed every order as sent
+    const rep = head.account.report, acc = head.account;
+    if (!acc.rejections.length && !acc.liquidations.length && !last.ledger.fills.some(f => f.status === 'partial')) {
+      for (const x of run.positions) {
+        const b = byPos.get(x.id);
+        rep.reconciliation.checks.push({ name: `position ${x.id}: engine net = ledger net`, a: Math.round(x.net * 1e4) / 1e4, b: b ? Math.round(b.net * 1e4) / 1e4 : 0, ok: !!b && Math.abs(x.net - b.net) <= 0.01 });
+      }
+      rep.reconciliation.ok = rep.reconciliation.checks.every(c => c.ok);
+    }
+    for (const g of run.gates) if (!rep.warnings.includes(g.message)) rep.warnings.unshift(g.message);
+    return Object.assign(head, { positions: run.positions, gates: run.gates, spec: run.spec, spec_hash: run.config_hash });
+  }
+
   function scenarios() {
     const cfg = E.makeConfig({}), ocfg = E.ORB.makeConfig({});
     return Object.keys(E.SCENARIOS).map(k => {
@@ -306,5 +358,5 @@
       account: { daily: last.ledger.daily, config: last.ledger.acct }, results: last.results.map(slimResult) };
   }
 
-  return { run: (p, sessions) => ({ straddle, orb, fourleg })[p.strategy](p, sessions), scenarios, replay, exportCsv, inspect, dayOutcomes, evaluate, lastRun, ENGINE_EXTRAS };
+  return { run: (p, sessions) => ({ straddle, orb, fourleg, legs: legsStrategy })[p.strategy](p, sessions), scenarios, replay, exportCsv, inspect, dayOutcomes, evaluate, lastRun, ENGINE_EXTRAS };
 });

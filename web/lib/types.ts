@@ -1,10 +1,14 @@
+import type { Gate, PositionRecord, StrategySpec } from './legs/types';
+
 export type StrategySlug = 'straddle' | 'orb' | 'fourleg';
 export type Focus = 'index' | 'stocks' | 'exploring';
 export type Params = Record<string, string | number | boolean>;
 
 export interface RunResult {
-  strategy: StrategySlug;
-  unit: 'day' | 'trade' | 'month';
+  /** 'legs' = the universal leg engine (params.strategy 'legs', params.spec = a StrategySpec). */
+  strategy: StrategySlug | 'legs';
+  /** What one "traded" unit is: a day (straddle), a trade (ORB), a month (four-leg), a position (leg engine). */
+  unit: 'day' | 'trade' | 'month' | 'position';
   policy?: 'A' | 'B';
   sessions: number;
   traded: number;
@@ -29,6 +33,13 @@ export interface RunResult {
   data?: { source: 'dhan'; from: string; to: string; days: number; lot_sizes: number[]; lot_source: string; expiry_source: string; flags: string[]; range_key?: string | null };
   /** One outcome per session the engine received (straddle, ORB, legs). docs/ENGINE_INTERFACES.md §2. */
   days?: DayOutcome[];
+  /** Leg engine only: every position with its legs, payoff and exit (docs/ENGINE_INTERFACES.md §2). */
+  positions?: PositionRecord[];
+  /** Leg engine only: data gates and warnings that applied to this run (errors never reach a result; they throw). */
+  gates?: Gate[];
+  /** Leg engine only: the normalised spec that ran and its hash. */
+  spec?: StrategySpec;
+  spec_hash?: string;
 }
 
 /** What happened on one session of a run. `days.length` always equals the number of sessions run. */
@@ -46,7 +57,7 @@ export interface DayOutcome {
 
 export interface ReplayLeg { side: string; strike: number; kind: string; entry_t: number; entry_px: number; exit_t: number | null; exit_px: number | null; exit_reason: string | null; stop: number | null; net: number }
 export interface Replay {
-  strategy: 'straddle' | 'orb'; date: string; status: string; reason: string | null; net?: number; gross?: number; costs?: number;
+  strategy: 'straddle' | 'orb' | 'legs'; date: string; status: string; reason: string | null; net?: number; gross?: number; costs?: number;
   exit_reason?: string; expiry?: string; lot_size?: number; qty?: number; flags: string[];
   or_high: number | null; or_low: number | null; decision_t?: number | null;
   candles: { t: number; o: number; h: number; l: number; c: number }[];

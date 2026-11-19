@@ -79,8 +79,21 @@
     return { brokerage, stt, exchange, gst, sebi, stamp, total: brokerage + stt + exchange + gst + sebi + stamp, schedule: r.id, verified: r.verified };
   }
 
+  /**
+   * Charges on cash settlement at expiry (no trade happens): STT at `exercisePct` % of intrinsic value x qty on a
+   * LONG option that expires in the money; nothing on a short or on an option that expires worthless. No brokerage,
+   * exchange, SEBI, stamp or GST. UNVERIFIED: the default 0.125% and the zero brokerage are assumptions, flagged
+   * on every report that uses them.
+   */
+  function settlementCharges(dir, intrinsicPx, qty, exercisePct) {
+    const stt = dir > 0 && intrinsicPx > 0 ? intrinsicPx * qty * exercisePct / 100 : 0;
+    return { brokerage: 0, stt, exchange: 0, gst: 0, sebi: 0, stamp: 0, total: stt, schedule: SETTLEMENT_SCHEDULE, verified: false };
+  }
+  const SETTLEMENT_SCHEDULE = 'expiry-settlement';
+
   // ------------------------------------------------------------------ account configuration
   const POLICIES = ['reject', 'partial', 'liquidate', 'record'];
+  const MARGIN_MODELS = ['per_leg', 'hedged'];
   const POLICY_TEXT = {
     reject: 'Reject the trade when margin is short',
     partial: 'Trade fewer lots when margin is short (reject if not even one lot fits)',
@@ -97,6 +110,8 @@
     liquidation_threshold_pct: 100, // force-close when equity < this % of margin blocked
     liquidation_penalty_pct: 0.0,  // extra slippage on forced exits, % of premium turnover
     brokerage_per_order: 20,
+    margin_model: 'per_leg',    // 'per_leg': every short leg on its own; 'hedged': worst loss over a ±SPAN-like move, per portfolio
+    exercise_stt_pct: 0.125,    // STT on intrinsic value of a long ITM option settled at expiry. UNVERIFIED
     risk_free_pct: 0,           // annual, for Sharpe/Sortino
     periods_per_year: 252,
   };
@@ -107,7 +122,8 @@
       if (over[k] !== undefined && over[k] !== null && over[k] !== '') a[k] = over[k];
     }
     if (!POLICIES.includes(a.margin_policy)) throw new Error(`margin_policy must be one of ${POLICIES.join(', ')}`);
-    for (const k of ['initial_capital', 'margin_span_pct', 'margin_exposure_pct', 'liquidation_threshold_pct', 'liquidation_penalty_pct', 'brokerage_per_order', 'risk_free_pct', 'periods_per_year']) {
+    if (!MARGIN_MODELS.includes(a.margin_model)) throw new Error(`margin_model must be one of ${MARGIN_MODELS.join(', ')}`);
+    for (const k of ['initial_capital', 'margin_span_pct', 'margin_exposure_pct', 'liquidation_threshold_pct', 'liquidation_penalty_pct', 'brokerage_per_order', 'risk_free_pct', 'periods_per_year', 'exercise_stt_pct']) {
       a[k] = Number(a[k]);
       if (!isFinite(a[k]) || a[k] < 0) throw new Error(`${k} must be a number of at least 0`);
     }
@@ -119,6 +135,42 @@
   function marginFor(dir, strike, qty, acct) {
     if (dir > 0) return acct.long_option_margin ? strike * qty * (acct.margin_span_pct + acct.margin_exposure_pct) / 100 : 0;
     return strike * qty * (acct.margin_span_pct + acct.margin_exposure_pct) / 100;
+  }
+
+  const intrinsicOf = (side, S, K) => (side === 'CE' ? Math.max(0, S - K) : Math.max(0, K - S));
+  /**
+   * ESTIMATED margin for a set of open legs under the 'hedged' model: the worst loss, at intrinsic value, over index
+   * levels within ±SPAN-like % of the reference level (the index at entry when the engine gives it, else the mean
+   * strike), plus exposure % of the short notional at that level; never more than the per-leg figure. Long premium is
+   * held as cash, not margin. Legs of different expiries are valued at intrinsic on the same level (an approximation).
+   */
+  function hedgedMargin(ls, acct) {
+    const shorts = ls.filter(l => l.dir < 0);
+    if (!shorts.length) return 0;
+    let naive = 0;
+    for (const l of shorts) naive += marginFor(-1, l.strike, l.qty, acct);
+    const refs = ls.map(l => l.spot).filter(x => typeof x === 'number' && x > 0);
+    const ref = refs.length ? refs.reduce((a, b) => a + b, 0) / refs.length : ls.reduce((a, l) => a + l.strike, 0) / ls.length;
+    const scan = acct.margin_span_pct / 100, lo = ref * (1 - scan), hi = ref * (1 + scan);
+    const pts = [ref];
+    for (let k = 0; k <= 40; k++) pts.push(lo + (hi - lo) * k / 40);
+    for (const l of ls) if (l.strike > lo && l.strike < hi) pts.push(l.strike);
+    let worst = 0;
+    for (const S of pts) {
+      let loss = 0;
+      for (const l of ls) loss -= l.dir * intrinsicOf(l.side, S, l.strike) * l.qty;
+      if (loss > worst) worst = loss;
+    }
+    let shortQty = 0;
+    for (const l of shorts) shortQty += l.qty;
+    return Math.min(naive, worst + acct.margin_exposure_pct / 100 * ref * shortQty);
+  }
+  /** Margin blocked by a set of open legs under the account's model. per_leg = the sum of each leg's own margin. */
+  function portfolioMargin(ls, acct) {
+    if (acct.margin_model === 'hedged') return hedgedMargin(ls, acct);
+    let m = 0;
+    for (const l of ls) m += l.margin;
+    return m;
   }
 
   // ------------------------------------------------------------------ helpers
@@ -157,7 +209,7 @@
     const acct = makeAccount(acctOver);
     const byDate = {};
     for (const r of results) byDate[r.date] = r;
-    const days = results.filter(r => ['traded', 'no_entry', 'filtered'].includes(r.status)).slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    const days = results.filter(r => ['traded', 'no_entry', 'filtered', 'holding'].includes(r.status)).slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
     const excludedDays = results.filter(r => r.status === 'excluded').map(r => ({ date: r.date, reason: r.reason }));
 
     const S = { balance: acct.initial_capital, cumGross: 0, cumCharges: 0, cumNet: 0, seq: 0, tradeSeq: 0, orders: 0, engineCostDiff: 0,
@@ -166,18 +218,31 @@
       totalPremiumPaid: 0, totalPremiumReceived: 0, totalTurnover: 0, cashOut: 0 };
     let peakIntraEq = acct.initial_capital;
     const fills = [], trades = [], daily = [], rejections = [], liquidations = [], warnings = [], schedules = new Map(), lotSizes = new Set();
+    // Legs the engine carries to the next session (multi-day positions) stay open across days with their margin.
+    let carried = new Map(), carriedSkipped = new Set();
+    const unrealisedOf = ls => { let u = 0; for (const l of ls) if (l.open) u += l.dir < 0 ? (l.entry_px - l.last_px) * l.qty : (l.last_px - l.entry_px) * l.qty; return u; };
 
     for (const res of days) {
       const lot = lotOf(res);
       if (lot) lotSizes.add(lot);
       const dayOpen = S.balance;
+      const legs = carried, skipped = carriedSkipped;
+      carried = new Map(); carriedSkipped = new Set();
+      const uOpen = unrealisedOf(legs.values());
       const d = { date: res.date, status: res.status, opening_balance: dayOpen, trades: 0, rejected: 0, fills: 0, gross_realised: 0, charges: 0, net_realised: 0, closing_balance: dayOpen,
-        peak_margin: 0, peak_deployed: 0, peak_exposure: 0, min_available: null, peak_util_pct: 0, intraday_low_equity: dayOpen, intraday_peak_unrealised: 0, closing_equity: dayOpen,
-        drawdown: 0, drawdown_pct: 0, lot_size: lot, exit_reason: res.exit_reason || '', reason: res.reason || '', flags: (res.flags || []).join(' ') };
-      const legs = new Map(), skipped = new Set();
+        peak_margin: 0, peak_deployed: 0, peak_exposure: 0, min_available: null, peak_util_pct: 0, intraday_low_equity: dayOpen + uOpen, intraday_peak_unrealised: 0, closing_equity: dayOpen + uOpen,
+        drawdown: 0, drawdown_pct: 0, lot_size: lot, exit_reason: res.exit_reason || '', reason: res.reason || '', flags: (res.flags || []).join(' '),
+        open_legs: 0, unrealised_start: uOpen, unrealised_end: 0 };
+      const hadCarry = legs.size > 0;
       let dayMargin = 0, dayHeld = 0;
       const open = () => [...legs.values()].filter(l => l.open);
-      const blocked = () => { let m = 0, h = 0, e = 0, u = 0; for (const l of open()) { m += l.margin; h += l.held; e += l.notional; u += l.dir < 0 ? (l.entry_px - l.last_px) * l.qty : (l.last_px - l.entry_px) * l.qty; } return { m, h, e, u }; };
+      const blocked = () => { let m = 0, h = 0, e = 0, u = 0; const ol = open(); for (const l of ol) { m += l.margin; h += l.held; e += l.notional; u += l.dir < 0 ? (l.entry_px - l.last_px) * l.qty : (l.last_px - l.entry_px) * l.qty; } if (acct.margin_model === 'hedged') m = hedgedMargin(ol, acct); return { m, h, e, u }; };
+      /** Extra margin a new leg needs on top of what the open legs already block (per_leg: its own margin). */
+      const marginInc = (dir, strike, qty, side, spot) => {
+        if (acct.margin_model !== 'hedged') return marginFor(dir, strike, qty, acct);
+        const ol = open();
+        return Math.max(0, hedgedMargin(ol.concat([{ dir, strike, qty, side, spot, margin: 0 }]), acct) - hedgedMargin(ol, acct));
+      };
       const touch = (b) => {
         d.peak_margin = Math.max(d.peak_margin, b.m); d.peak_deployed = Math.max(d.peak_deployed, b.m + b.h); d.peak_exposure = Math.max(d.peak_exposure, b.e);
         S.peakMargin = Math.max(S.peakMargin, b.m); S.peakDeployed = Math.max(S.peakDeployed, b.m + b.h); S.peakExposure = Math.max(S.peakExposure, b.e);
@@ -194,7 +259,8 @@
       /** Books one executed fill; returns { row, leg }. */
       const book = (f, qty, px, opt) => {
         opt = opt || {};
-        const ch = chargesFor(f.action, px, qty, res.date, acct.brokerage_per_order);
+        const settling = !!f.settlement && legs.has(f.legId);
+        const ch = settling ? settlementCharges(legs.get(f.legId).dir, px, qty, acct.exercise_stt_pct) : chargesFor(f.action, px, qty, res.date, acct.brokerage_per_order);
         if (opt.penalty) { ch.total += opt.penalty; ch.exchange += opt.penalty; }
         schedules.set(ch.schedule, ch.verified);
         if (f.costs && f.costs.total != null && !opt.forced && qty === f.qty0 && px === f.px) S.engineCostDiff += Math.abs(f.costs.total - ch.total);
@@ -202,20 +268,21 @@
         let leg = legs.get(f.legId), opening = !leg, realised = 0, marginReq = 0;
         if (opening) {
           const dir = dirOf(f.action);
-          marginReq = marginFor(dir, f.strike, qty, acct);
-          leg = { id: f.legId, dir, strike: f.strike, side: f.side, expiry: f.expiry, qty, entry_px: px, entry_t: f.t, entry_ch: ch, margin: marginReq, held: dir > 0 ? turnover : 0,
+          marginReq = marginInc(dir, f.strike, qty, f.side, f.spot);
+          leg = { id: f.legId, dir, strike: f.strike, side: f.side, expiry: f.expiry, qty, entry_px: px, entry_t: f.t, entry_ch: ch, margin: acct.margin_model === 'hedged' ? 0 : marginReq, held: dir > 0 ? turnover : 0,
             notional: f.strike * qty, open: true, date: res.date, entry_reason: f.reason, kind: f.kind, rowIdx: fills.length, seqs: [], intrabar_in: !!f.intrabar, last_px: px,
-            balance_before: balBefore, avail_before: availBefore, margin_req: marginReq };
+            balance_before: balBefore, avail_before: availBefore, margin_req: marginReq, spot: f.spot, position: f.position || '' };
           legs.set(f.legId, leg);
           if (dir > 0) S.totalPremiumPaid += turnover; else S.totalPremiumReceived += turnover;
           if (S.firstMargin == null && marginReq > 0) S.firstMargin = marginReq;
         } else {
-          leg.exit_t = f.t; leg.exit_px = px; leg.exit_reason = f.reason; leg.exit_ch = ch; leg.intrabar_out = !!f.intrabar; leg.open = false; leg.last_px = px;
+          leg.exit_t = f.t; leg.exit_date = res.date; leg.exit_px = px; leg.exit_reason = f.reason; leg.exit_ch = ch; leg.intrabar_out = !!f.intrabar; leg.open = false; leg.last_px = px;
           realised = leg.dir < 0 ? (leg.entry_px - px) * qty : (px - leg.entry_px) * qty;
           leg.gross = realised;
         }
-        const released = opening ? 0 : leg.margin;
+        let released = opening ? 0 : leg.margin;
         if (!opening) { leg.margin = 0; leg.held = 0; }
+        if (!opening && acct.margin_model === 'hedged') released = Math.max(0, b0.m - blocked().m);
         S.balance += realised - ch.total;
         S.cumGross += realised; S.cumCharges += ch.total; S.cumNet += realised - ch.total;
         d.gross_realised += realised; d.charges += ch.total;
@@ -245,7 +312,7 @@
         const ex = legs.get(f.legId);
         if (ex) { if (ex.open) finish(book(Object.assign({}, f, { qty0: f.qty }), ex.qty, f.px).leg); return; }
         const dir = dirOf(f.action), b = blocked(), avail = S.balance - b.m - b.h;
-        const needFor = q => marginFor(dir, f.strike, q, acct) + (dir > 0 ? f.px * q : 0) + chargesFor(f.action, f.px, q, res.date, acct.brokerage_per_order).total;
+        const needFor = q => marginInc(dir, f.strike, q, f.side, f.spot) + (dir > 0 ? f.px * q : 0) + chargesFor(f.action, f.px, q, res.date, acct.brokerage_per_order).total;
         let qty = f.qty, need = needFor(qty), status = 'ok', shortfall = 0;
         if (need > avail + 1e-9) {
           shortfall = need - avail; S.shortfalls++; S.maxShortfall = Math.max(S.maxShortfall, shortfall);
@@ -298,25 +365,29 @@
         if (acct.margin_policy === 'liquidate' && !liquidated && b.m > 0 && eq < b.m * acct.liquidation_threshold_pct / 100) liquidate(ev.t);
         else if (acct.margin_policy === 'liquidate' && liquidated && eq < b.m * acct.liquidation_threshold_pct / 100) liquidate(ev.t);
       }
-      for (const lg of open()) { // data ended with a position open: never drop it silently
+      const carry = new Set((res.carry || []).map(String));
+      for (const id of carry) if (skipped.has(id) || skipped.has(Number(id))) carriedSkipped.add(skipped.has(id) ? id : Number(id));
+      for (const lg of open()) if (carry.has(String(lg.id))) carried.set(lg.id, lg);
+      for (const lg of open().filter(l => !carry.has(String(l.id)))) { // data ended with a position open: never drop it silently
         warnings.push(`${res.date}: leg ${lg.id} was still open at the end of the session; closed at its last price with charges. Check the data.`);
         finish(book({ t: lg.entry_t, legId: lg.id, action: lg.dir < 0 ? 'BUY' : 'SELL', strike: lg.strike, side: lg.side, expiry: lg.expiry, qty: lg.qty, px: lg.last_px, reason: 'open at end of data' }, lg.qty, lg.last_px, { forced: true }).leg);
       }
       d.net_realised = d.gross_realised - d.charges;
-      d.closing_balance = S.balance; d.closing_equity = S.balance;
+      d.open_legs = carried.size; d.unrealised_end = unrealisedOf(carried.values());
+      d.closing_balance = S.balance; d.closing_equity = S.balance + d.unrealised_end;
       if (d.min_available == null) d.min_available = dayOpen;
-      if (d.trades > 0 || d.rejected > 0) { S.marginSum += dayMargin; S.marginDays++; S.deployedSum += dayMargin + dayHeld; S.deployedDays++; }
+      if (d.trades > 0 || d.rejected > 0 || d.fills > 0 || hadCarry) { S.marginSum += dayMargin; S.marginDays++; S.deployedSum += dayMargin + dayHeld; S.deployedDays++; }
       S.peakUtil = Math.max(S.peakUtil, d.peak_util_pct === Infinity ? 1e9 : d.peak_util_pct);
       daily.push(d);
     }
     let pk = acct.initial_capital;
-    for (const d of daily) { pk = Math.max(pk, d.closing_balance); d.drawdown = pk - d.closing_balance; d.drawdown_pct = 100 * d.drawdown / pk; }
+    for (const d of daily) { pk = Math.max(pk, d.closing_equity); d.drawdown = pk - d.closing_equity; d.drawdown_pct = 100 * d.drawdown / pk; }
 
     const tradebook = trades.map((lg, n) => {
       const res = byDate[lg.date] || {};
       const evs = (res.events || []).filter(e => e.leg === lg.id || e.trade === lg.id).map(e => `${hmStr(e.t)} ${e.text}`);
       const lt = lotOf(res);
-      return { trade_no: n + 1, date: lg.date, leg: lg.id, kind: lg.kind || '', symbol: info.symbol || res.symbol || '', side: lg.side, strike: lg.strike, expiry: lg.expiry, direction: lg.dir < 0 ? 'SHORT' : 'LONG',
+      return { trade_no: n + 1, date: lg.date, exit_date: lg.exit_date || lg.date, position_id: lg.position || '', leg: lg.id, kind: lg.kind || '', symbol: info.symbol || res.symbol || '', side: lg.side, strike: lg.strike, expiry: lg.expiry, direction: lg.dir < 0 ? 'SHORT' : 'LONG',
         qty: lg.qty, lots: lt ? lg.qty / lt : null, lot_size: lt, entry_time: hmStr(lg.entry_t), entry_px: lg.entry_px, exit_time: hmStr(lg.exit_t), exit_px: lg.exit_px, exit_reason: lg.exit_reason,
         premium: lg.entry_px * lg.qty, notional: lg.notional, margin_blocked: lg.margin_req, gross_pnl: lg.gross,
         brokerage: lg.entry_ch.brokerage + lg.exit_ch.brokerage, stt: lg.entry_ch.stt + lg.exit_ch.stt, exchange: lg.entry_ch.exchange + lg.exit_ch.exchange, gst: lg.entry_ch.gst + lg.exit_ch.gst,
@@ -350,8 +421,10 @@
     for (const f of c.fills) if (f.status !== 'rejected') for (const k of Object.keys(charges)) charges[k] += k === 'total' ? f.charges : f[k];
     const netAbs = end - cap;
     // daily series over every session in range (idle days are 0): the base for Sharpe, Sortino, drawdown
+    // daily return on equity: (net realised + change in unrealised) / previous closing equity. For intraday strategies
+    // the unrealised terms are 0 and this is exactly net realised / previous closing balance.
     let prevBal = cap;
-    const rets = daily.map(d => { const r = prevBal > 0 ? d.net_realised / prevBal : 0; prevBal = d.closing_balance; return r; });
+    const rets = daily.map(d => { const r = prevBal > 0 ? (d.net_realised + (d.unrealised_end - d.unrealised_start)) / prevBal : 0; prevBal = d.closing_equity; return r; });
     const rfD = acct.risk_free_pct / 100 / acct.periods_per_year;
     const ex = rets.map(r => r - rfD);
     const sd = stdev(ex), downside = Math.sqrt(sum(ex.map(x => Math.min(0, x) ** 2)) / (ex.length || 1));
@@ -359,8 +432,8 @@
     const sortino = ex.length >= 2 && downside > 0 ? (sum(ex) / ex.length) / downside * Math.sqrt(acct.periods_per_year) : null;
     let peak = cap, maxDD = 0, maxDDPct = 0, ddFrom = null, ddTo = null, peakDate = null;
     for (const d of daily) {
-      if (d.closing_balance > peak) { peak = d.closing_balance; peakDate = d.date; }
-      const dd = peak - d.closing_balance;
+      if (d.closing_equity > peak) { peak = d.closing_equity; peakDate = d.date; }
+      const dd = peak - d.closing_equity;
       if (dd > maxDD) { maxDD = dd; maxDDPct = 100 * dd / peak; ddFrom = peakDate; ddTo = d.date; }
     }
     const first = daily.length ? daily[0].date : null, last = daily.length ? daily[daily.length - 1].date : null;
@@ -385,6 +458,8 @@
     if (unverified.length) warnings.push(`Cost rates not verified against an official source for: ${unverified.join(', ')}. See the rate table.`);
     if (stats.lotSizes.length > 1) warnings.push(`Lot size changed within the range (${stats.lotSizes.join(', ')}). Each day uses the size stored in its day file; check these against NSE circulars.`);
     warnings.push('Margin is ESTIMATED from a configurable percentage model. It is not SPAN output and not the broker’s actual historical margin.');
+    if (c.schedules.has(SETTLEMENT_SCHEDULE)) warnings.push(`Positions were cash-settled at expiry at intrinsic value against the index close of the last stored bar. Settlement charges are an assumption: STT ${acct.exercise_stt_pct}% of intrinsic value on long in-the-money options, no brokerage or other charges (UNVERIFIED).`);
+    if (acct.margin_model === 'hedged') warnings.push(`Margin model: hedged estimate (worst loss over a ±${acct.margin_span_pct}% index move at intrinsic value, plus ${acct.margin_exposure_pct}% exposure on short notional, capped at the per-leg figure). Not SPAN.`);
     if (stats.engineCostDiff > 0.05 * Math.max(1, stats.orders)) warnings.push(`Ledger charges differ from the engine's own cost lines by ₹${R(stats.engineCostDiff)} in total.`);
     if (stats.negBalanceEvents) warnings.push(`The balance went below zero (${stats.negBalanceEvents} event(s)).`);
     if (liquidations.length) warnings.push(`${liquidations.length} position(s) were force-closed at an approximate price (aggregate mark apportioned equally per unit).`);
@@ -426,7 +501,7 @@
         account_hash: hashStr(JSON.stringify(acct)), run_hash: null },
       account: acct, defs, warnings: warnings.filter(Boolean),
       range: { from: first, to: last, sessions: daily.length, traded_days: tradedDays.length, excluded_days: c.excludedDays },
-      cost_rates: [...c.schedules.keys()].map(id => { const r = COST_TABLE.find(x => x.id === id); return { id, effective_from: r.effective_from, stt_sell_pct: r.stt_sell_pct, exch_pct: r.exch_pct, sebi_pct: r.sebi_pct, stamp_buy_pct: r.stamp_buy_pct, gst_pct: r.gst_pct, verified: r.verified, source: r.source }; }),
+      cost_rates: [...c.schedules.keys()].filter(id => id !== SETTLEMENT_SCHEDULE).map(id => { const r = COST_TABLE.find(x => x.id === id); return { id, effective_from: r.effective_from, stt_sell_pct: r.stt_sell_pct, exch_pct: r.exch_pct, sebi_pct: r.sebi_pct, stamp_buy_pct: r.stamp_buy_pct, gst_pct: r.gst_pct, verified: r.verified, source: r.source }; }),
       capital: {
         initial_capital: cap, total_premium_paid: stats.totalPremiumPaid, total_premium_received: stats.totalPremiumReceived, total_trade_value: stats.totalTurnover,
         peak_notional: stats.peakExposure, peak_margin: stats.peakMargin, peak_deployed: stats.peakDeployed, avg_deployed: avgDeployed, cash_outflow: stats.cashOut,
@@ -437,10 +512,12 @@
         peak_utilisation_pct: stats.peakUtil >= 1e9 ? null : stats.peakUtil, shortfall_events: stats.shortfalls, max_shortfall: stats.maxShortfall,
         policy: acct.margin_policy, policy_text: POLICY_TEXT[acct.margin_policy], rejected_trades: rejections.length, forced_liquidations: liquidations.length,
         negative_balance_events: stats.negBalanceEvents, over_100_pct_events: stats.over100Events,
-        model: { kind: 'ESTIMATED', span_pct: acct.margin_span_pct, exposure_pct: acct.margin_exposure_pct, base: 'strike x quantity (proxy for underlying notional)', long_options: acct.long_option_margin ? 'margin applied' : 'premium only' },
+        model: { kind: 'ESTIMATED', model: acct.margin_model, span_pct: acct.margin_span_pct, exposure_pct: acct.margin_exposure_pct,
+          base: acct.margin_model === 'hedged' ? 'worst loss at intrinsic over ±span% of the index level at entry, plus exposure % of short notional; capped at per-leg' : 'strike x quantity (proxy for underlying notional)',
+          long_options: acct.long_option_margin ? 'margin applied' : 'premium only' },
       },
       pnl: {
-        gross_realised_profit: grossProfit, gross_realised_loss: grossLoss, net_realised_gross: grossProfit + grossLoss, unrealised_at_end: 0,
+        gross_realised_profit: grossProfit, gross_realised_loss: grossLoss, net_realised_gross: grossProfit + grossLoss, unrealised_at_end: daily.length ? daily[daily.length - 1].unrealised_end : 0,
         charges, total_charges: charges.total, net_profit: end - cap, ending_balance: end,
         peak_intraday_unrealised: Math.max(0, ...daily.map(d => d.intraday_peak_unrealised)), trough_intraday_equity: Math.min(cap, ...daily.map(d => d.intraday_low_equity)),
       },
@@ -488,7 +565,9 @@
     add('charge components add to the total', sum(exec.map(f => f.brokerage + f.stt + f.exchange + f.gst + f.sebi + f.stamp)), sum(exec.map(f => f.charges)), 0.01 + 0.001 * exec.length);
     add('every fill is closed: no position left open at the end', exec.filter(f => f.event === 'OPEN').length, exec.filter(f => f.event === 'CLOSE' || f.event === 'LIQUIDATE').length, 0);
     add('ledger charges = engine cost lines (same dated rates)', stats.engineCostDiff, 0, 0.05 + 0.01 * stats.orders);
-    add('unrealised P&L at the end = 0 (nothing double counted)', 0, 0, 0);
+    const lastDay = daily.length ? daily[daily.length - 1] : null;
+    add('unrealised P&L at the end = 0 (nothing left open, nothing double counted)', lastDay ? lastDay.unrealised_end : 0, 0, 0.005);
+    add('closing equity of the last day = ending balance', lastDay ? lastDay.closing_equity : end, end);
     return { ok: checks.every(x => x.ok), checks };
   }
 
@@ -505,12 +584,12 @@
   }
   const TRADEBOOK_COLS = ['trade_no', 'date', 'leg', 'kind', 'symbol', 'side', 'strike', 'expiry', 'direction', 'qty', 'lots', 'lot_size', 'entry_time', 'entry_px', 'exit_time', 'exit_px', 'exit_reason',
     'premium', 'notional', 'margin_blocked', 'gross_pnl', 'brokerage', 'stt', 'exchange', 'gst', 'sebi', 'stamp', 'charges', 'net_pnl', 'cost_schedule', 'cost_rates_verified', 'intrabar_entry', 'intrabar_exit',
-    'entry_reason', 'balance_before', 'available_margin_before', 'fills', 'flags', 'audit'];
+    'entry_reason', 'balance_before', 'available_margin_before', 'fills', 'flags', 'audit', 'position_id', 'exit_date'];
   const FILL_COLS = ['seq', 'date', 'time', 'leg', 'trade_no', 'event', 'status', 'action', 'side', 'strike', 'expiry', 'qty', 'lots', 'px', 'turnover', 'notional', 'reason', 'opening_balance', 'available_margin_before',
     'margin_required', 'margin_blocked', 'margin_released', 'premium_held', 'position_value', 'realised_gross', 'unrealised_gross', 'brokerage', 'stt', 'exchange', 'gst', 'sebi', 'stamp', 'charges',
     'available_margin_after', 'balance_after', 'equity_after', 'cum_realised_gross', 'cum_charges', 'cum_net_realised', 'exposure_after', 'utilisation_pct', 'shortfall', 'cost_schedule', 'intrabar'];
   const DAILY_COLS = ['date', 'status', 'opening_balance', 'trades', 'rejected', 'fills', 'gross_realised', 'charges', 'net_realised', 'closing_balance', 'peak_margin', 'peak_deployed', 'peak_exposure', 'min_available',
-    'peak_util_pct', 'intraday_low_equity', 'intraday_peak_unrealised', 'drawdown', 'drawdown_pct', 'lot_size', 'exit_reason', 'reason', 'flags'];
+    'peak_util_pct', 'intraday_low_equity', 'intraday_peak_unrealised', 'drawdown', 'drawdown_pct', 'lot_size', 'exit_reason', 'reason', 'flags', 'open_legs', 'unrealised_end', 'closing_equity'];
 
   function performanceCsv(rep) {
     const rows = [['section', 'metric', 'value', 'denominator_or_definition']];
@@ -532,6 +611,6 @@
     return rows.map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
   }
 
-  return { COST_TABLE, COST_TABLE_VERSION, ACCOUNT_DEFAULTS, POLICIES, POLICY_TEXT, makeAccount, ratesFor, ratesHook, chargesFor, marginFor, runLedger, toCsv, performanceCsv,
+  return { COST_TABLE, COST_TABLE_VERSION, ACCOUNT_DEFAULTS, POLICIES, POLICY_TEXT, MARGIN_MODELS, makeAccount, ratesFor, ratesHook, chargesFor, settlementCharges, marginFor, hedgedMargin, runLedger, toCsv, performanceCsv,
     TRADEBOOK_COLS, FILL_COLS, DAILY_COLS, hashStr };
 });
