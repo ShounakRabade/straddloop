@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (19 Nov 2026)
+## Unreleased: Dhan pull fixes (19 Nov 2026)
 
 * First run against real Dhan data. Rolling-option calls now fetch one day each: Dhan refuses any
   longer range (DH-905), contrary to its docs.
@@ -13,6 +13,18 @@
   window, and a daily ATM straddle table for spotting expiry rolls.
 * `tzdata` added on Windows (pyarrow needs it for IST timestamps).
 * Sample NIFTY WEEK code 1, ATM+-10, 6-17 Oct 2025: 157,499 option bars, overall PASS.
+
+## Unreleased: real NIFTY data on the website
+
+* Day files: `straddloop supabase-upload` turns the local Parquet store into one gzip JSON file per
+  trading day per expiry series (about 100 KB) in the private Supabase bucket `market-data`, plus a
+  `market_days` row each. Resumable by checksum. `straddloop export-days` writes the same files locally.
+* `web/supabase/market_data.sql`: `market_days`, `data_readers` and read-only policies (readers only).
+* Website Lab: Synthetic or Real NIFTY (Dhan) data, date range, weekly or monthly series, lots, strike
+  offset, slippage, lot-size override, and a minute-by-minute day replay. Falls back to day files on
+  this computer. The page states that fills are candle-based and optimistic.
+* Engine: `strike_offset` for the straddle (default 0 keeps the original rules).
+* Expiry dates and lot sizes in day files are ASSUMED until the bhavcopy step confirms them.
 
 ## 0.1.0 (22 Oct 2026)
 
