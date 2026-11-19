@@ -75,8 +75,9 @@ class ContractRow:
     settle: float | None
     underlying_price: float | None
     oi: float | None
-    volume: float | None
-    lot_size: int | None
+    oi_change: float | None  # change in open interest vs the previous session, as published
+    volume: float | None  # as published: quantity in the UDiFF layout, contracts (lots) in the legacy layout
+    lot_size: int | None  # None in the legacy layout, which does not carry it
     source: str
 
 

@@ -21,6 +21,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
+import os
+import random
 import time as _time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -29,6 +32,7 @@ from pathlib import Path
 import httpx
 
 from straddloop.data.providers.base import (
+    AuthError,
     ExpiredOptionRequest,
     ProviderCapabilities,
     ProviderError,
@@ -97,7 +101,11 @@ class DhanProvider:
         raw_dir: Path,
         requests_per_second: float = 4.0,
         http: httpx.Client | None = None,
+        max_attempts: int = 6,
+        sleep=_time.sleep,
     ):
+        self.max_attempts = max_attempts
+        self._sleep = sleep
         if not access_token:
             raise ProviderError("Dhan access token is missing; set DHAN_ACCESS_TOKEN in .env")
         self._headers = {
@@ -112,22 +120,70 @@ class DhanProvider:
         self._raw_dir = raw_dir / SOURCE
 
     # ---- transport -------------------------------------------------------------------------
+    # Error codes below are from Dhan's published annexure (https://dhanhq.co/docs/v2/annexure/) as recalled
+    # when this was written; not re-verified live from the build environment (api.dhan.co was unreachable).
+    #   DH-901 invalid/expired token (HTTP 401)       -> AuthError, stop
+    #   DH-902 no API access / no Data API plan       -> AuthError, stop
+    #   DH-903 account rule violation                 -> AuthError, stop
+    #   DH-904 rate limit (HTTP 429)                  -> retry with backoff
+    #   DH-905 bad input                              -> ProviderError, no retry
+    #   DH-908/909 server / network error (5xx)       -> retry with backoff
 
-    def _post(self, endpoint: str, body: dict) -> dict:
-        for attempt in range(5):
+    AUTH_CODES = {"DH-901", "DH-902", "DH-903"}
+    RETRY_CODES = {"DH-904", "DH-908", "DH-909"}
+
+    def _backoff(self, attempt: int, retry_after: str | None = None) -> float:
+        if retry_after and retry_after.replace(".", "", 1).isdigit():
+            return min(120.0, float(retry_after))
+        return min(60.0, 2.0 ** (attempt + 1)) * (0.5 + random.random() / 2)  # jitter: 50-100% of the step
+
+    def _request(self, method: str, endpoint: str, body: dict | None = None) -> dict:
+        last = "no attempt made"
+        for attempt in range(self.max_attempts):
             self._limiter.wait()
-            resp = self._http.post(endpoint, json=body, headers=self._headers)
-            if resp.status_code == 429 or resp.status_code >= 500:
-                delay = 2 ** (attempt + 1)
-                log.warning("Dhan %s returned %s; retrying in %ss", endpoint, resp.status_code, delay)
-                _time.sleep(delay)
+            try:
+                resp = self._http.request(method, endpoint, json=body, headers=self._headers)
+            except httpx.TransportError as exc:  # timeouts, resets, DNS: nothing was received, nothing stored
+                last = f"network error {type(exc).__name__}"
+                delay = self._backoff(attempt)
+                log.warning("Dhan %s: %s; retry %d/%d in %.1fs", endpoint, last, attempt + 1, self.max_attempts, delay)
+                self._sleep(delay)
+                continue
+            code = _error_code(resp)
+            if resp.status_code == 401 or code in self.AUTH_CODES or resp.status_code == 403:
+                raise AuthError(
+                    f"Dhan rejected the credentials on {endpoint} (HTTP {resp.status_code}, {code or 'no code'}). "
+                    "The access token has probably expired or the Data API plan is inactive: generate a new "
+                    "token at web.dhan.co, put it in .env as DHAN_ACCESS_TOKEN, and re-run. Nothing stored was "
+                    "changed; the run resumes where it stopped.")
+            if resp.status_code == 429 or resp.status_code >= 500 or code in self.RETRY_CODES:
+                last = f"HTTP {resp.status_code} {code or ''}".strip()
+                delay = self._backoff(attempt, resp.headers.get("retry-after"))
+                log.warning("Dhan %s: %s; retry %d/%d in %.1fs", endpoint, last, attempt + 1, self.max_attempts, delay)
+                self._sleep(delay)
                 continue
             if resp.status_code != 200:
                 raise ProviderError(f"Dhan {endpoint} returned {resp.status_code}: {resp.text[:300]}")
-            payload = resp.json()
-            self._archive(endpoint, body, payload)
+            try:
+                payload = resp.json()
+            except ValueError as exc:
+                raise ProviderError(f"Dhan {endpoint}: response is not JSON") from exc
+            if not isinstance(payload, dict):
+                raise ProviderError(f"Dhan {endpoint}: unexpected response shape {type(payload).__name__}")
+            if payload.get("errorCode") or str(payload.get("status", "")).lower() == "failure":
+                raise ProviderError(f"Dhan {endpoint}: error in a 200 response: {str(payload)[:300]}")
+            if body is not None:
+                self._archive(endpoint, body, payload)
             return payload
-        raise ProviderError(f"Dhan {endpoint}: gave up after repeated rate-limit or server errors")
+        raise ProviderError(f"Dhan {endpoint}: gave up after {self.max_attempts} attempts ({last})")
+
+    def _post(self, endpoint: str, body: dict) -> dict:
+        return self._request("POST", endpoint, body)
+
+    def profile(self) -> dict:
+        """Token check: GET /profile. Returns token expiry and plan fields only (never the token)."""
+        data = self._request("GET", "/profile")
+        return {k: data.get(k) for k in ("dhanClientId", "tokenValidity", "activeSegment", "dataPlan", "dataValidity")}
 
     def _archive(self, endpoint: str, body: dict, payload: dict) -> Path:
         key = hashlib.sha256(json.dumps([endpoint, body], sort_keys=True).encode()).hexdigest()[:16]
@@ -139,7 +195,12 @@ class DhanProvider:
             "fetched_at": datetime.now(UTC).isoformat(),
             "response": payload,
         }
-        path.write_text(json.dumps(record), encoding="utf-8")
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps(record), encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
         return path
 
     # ---- underlying candles ----------------------------------------------------------------
@@ -226,7 +287,27 @@ def moneyness_labels(max_offset: int) -> list[str]:
     return [f"ATM{o:+d}" if o else "ATM" for o in range(-max_offset, max_offset + 1)]
 
 
+def _error_code(resp: httpx.Response) -> str | None:
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    return body.get("errorCode") if isinstance(body, dict) else None
+
+
+def _check_stamps(stamps: list) -> None:
+    """Timestamps must be finite numbers in strictly ascending order (no duplicates, no reordering)."""
+    prev = None
+    for t in stamps:
+        if not isinstance(t, (int, float)) or isinstance(t, bool) or not math.isfinite(t):
+            raise ProviderError(f"Dhan response has a non-numeric timestamp {t!r}")
+        if prev is not None and t <= prev:
+            raise ProviderError("Dhan response timestamps are not strictly ascending")
+        prev = t
+
+
 def _arrays(block: dict, keys: list[str]) -> dict[str, list]:
+    _check_stamps(block.get("timestamp") or [])
     n = len(block.get("timestamp") or [])
     out = {}
     for key in keys:
@@ -236,12 +317,16 @@ def _arrays(block: dict, keys: list[str]) -> dict[str, list]:
         elif len(values) != n:
             raise ProviderError(f"Dhan response field {key!r} has {len(values)} values for {n} timestamps")
         else:
+            if key in ("open", "high", "low", "close") and any(v is None for v in values):
+                raise ProviderError(f"Dhan response has null values in {key!r}")
             out[key] = values
     return out
 
 
 def parse_intraday(payload: dict, underlying: str, interval_min: int) -> list[UnderlyingCandle]:
     block = payload.get("data", payload)
+    if not isinstance(block, dict):
+        raise ProviderError("Dhan intraday response has no data object")
     stamps = block.get("timestamp") or []
     cols = _arrays(block, ["open", "high", "low", "close", "volume"])
     return [
@@ -262,6 +347,8 @@ def parse_intraday(payload: dict, underlying: str, interval_min: int) -> list[Un
 
 def parse_rolling_option(payload: dict, request: ExpiredOptionRequest) -> list[OptionCandle]:
     data = payload.get("data") or {}
+    if not isinstance(data, dict):
+        raise ProviderError("Dhan rolling-option response has no data object")
     block = data.get("ce" if request.option_type == "CE" else "pe")
     if not block:
         return []

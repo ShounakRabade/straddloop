@@ -90,3 +90,9 @@ class SupabaseSync:
             "POST", "/rest/v1/market_days", json=[day.row()],
             headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
         )
+
+    def push_statuses(self, rows: list[dict]) -> None:
+        """Upsert ingestion states (market_day_status). Safe to repeat; rows are keyed by day."""
+        for i in range(0, len(rows), 500):
+            self._call("POST", "/rest/v1/market_day_status", json=rows[i:i + 500],
+                       headers={"Prefer": "resolution=merge-duplicates,return=minimal"})

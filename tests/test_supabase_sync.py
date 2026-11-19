@@ -57,15 +57,32 @@ def test_load_pulls_then_uploads_with_an_inclusive_end(monkeypatch, tmp_path):
     from straddloop.data import pull, upload_cli
 
     order = []
-    monkeypatch.setattr(pull, "pull_underlying", lambda prov, store, und, s, e, i: order.append(("index", s, e)))
-    monkeypatch.setattr(pull, "pull_options", lambda *a, **k: (order.append(("options", a[3], a[4], a[6]))
-                        or SimpleNamespace(days_fetched=[1], days_skipped=[], holidays=[])))
+    monkeypatch.setattr(pull, "ensure_range", lambda *a, **k: (order.append(("fill", a[3], a[4], a[6]))
+                        or SimpleNamespace(days_fetched=[1], days_skipped=[], holidays=[], days_partial=[],
+                                           days_failed=[])))
     monkeypatch.setattr(upload_cli, "cmd_supabase_upload", lambda args, settings: order.append("upload") or 0)
     settings = SimpleNamespace(has_dhan_credentials=True, dhan_client_id="1", dhan_access_token="t",
                                raw_dir=tmp_path, store_dir=tmp_path, dhan_requests_per_second=0)
     args = argparse.Namespace(underlying="NIFTY", expiry="WEEK", start="2025-10-06", end="2025-10-17", window=10)
     assert upload_cli.cmd_load(args, settings) == 0
-    assert order == [("index", date(2025, 10, 6), date(2025, 10, 18)),
-                     ("options", date(2025, 10, 6), date(2025, 10, 18), "WEEK"), "upload"]
+    assert order == [("fill", date(2025, 10, 6), date(2025, 10, 17), "WEEK"), "upload"]  # end stays inclusive
     settings.has_dhan_credentials = False
     assert upload_cli.cmd_load(args, settings) == 1
+
+
+def test_ledger_statuses_become_publishable_rows(tmp_path):
+    from types import SimpleNamespace
+
+    from straddloop.data.availability import option_key
+    from straddloop.data.ledger import Ledger
+    from straddloop.data.upload_cli import ledger_status_rows
+
+    ledger = Ledger(tmp_path)
+    key = option_key("NIFTY", "WEEK", 1, 1)
+    ledger.set_day("option_candles", key, date(2025, 10, 6), "partial", rows=10, source="dhan",
+                   detail={"reasons": ["ATM CE has 200 of 375 bars"]})
+    ledger.set_day("option_candles", key, date(2025, 10, 7), "failed", source="dhan", detail={"reasons": ["boom"]})
+    ledger.close()
+    rows = ledger_status_rows(SimpleNamespace(store_dir=tmp_path), "NIFTY", "WEEK", date(2025, 10, 1), date(2025, 10, 31))
+    assert [(r["trade_date"], r["status"], r["reason"]) for r in rows] == [
+        ("2025-10-06", "partial", "ATM CE has 200 of 375 bars"), ("2025-10-07", "failed", "boom")]
