@@ -64,7 +64,7 @@
     const lot = opts.lotSize > 0 ? opts.lotSize : doc.lot_size;
     return {
       date: doc.date, symbol: doc.underlying, source: 'dhan', bar_minutes: 1, times, und,
-      expiries: [{ expiry: doc.expiry, lot_size: lot, contracts }],
+      expiries: [{ expiry: doc.expiry, lot_size: lot, contracts, series: doc.expiry_flag || 'WEEK' }],
       meta: { expiry_flag: doc.expiry_flag, expiry_source: doc.expiry_source, lot_source: opts.lotSize > 0 ? 'set in the Lab' : doc.lot_source,
         file_lot_size: doc.lot_size, flags },
     };
@@ -76,5 +76,20 @@
     return JSON.parse(await new Response(stream).text());
   }
 
-  return { undelta, toSession, gunzipJSON };
+  /**
+   * One session per date: day files of the same date from different expiry series (WEEK, MONTH) become one session
+   * with one expiry entry per series, so a strategy can hold legs in both. The index comes from the first file.
+   */
+  function mergeSessions(list) {
+    const byDate = new Map();
+    for (const s of list) {
+      const have = byDate.get(s.date);
+      if (!have) { byDate.set(s.date, s); continue; }
+      for (const ex of s.expiries) if (!have.expiries.some(e => e.series === ex.series)) have.expiries.push(ex);
+      for (const f of s.meta.flags) if (!have.meta.flags.includes(f)) have.meta.flags.push(f);
+    }
+    return [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : 1));
+  }
+
+  return { undelta, toSession, gunzipJSON, mergeSessions };
 });
