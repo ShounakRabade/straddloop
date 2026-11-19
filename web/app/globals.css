@@ -417,3 +417,24 @@ input[type='range']::-moz-range-thumb { width: 18px; height: 18px; border-radius
 .choice .label { padding-right: 30px; }
 
 @media (max-width: 600px) { .chart:not(.spark) text { font-size: 17px; } .scn .chart text, .strat-card-chart .chart text { font-size: 11px; } }
+
+/* ---------- Lab: real data and day replay ---------- */
+.callout--real { background: var(--cobalt-soft); }
+.data-box { padding: 12px; border: 1.5px dashed color-mix(in oklch, var(--ink) 40%, transparent); border-radius: var(--radius); }
+.dates { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.dates .field { gap: 4px; }
+.input--sm { min-height: 40px; padding: 6px 10px; font-size: 0.875rem; }
+select.input--sm { width: auto; max-width: 100%; }
+.replay-chart .or-band { fill: var(--marker); opacity: 0.45; }
+.replay-chart .wick { stroke: var(--ink); stroke-width: 1.2; }
+.replay-chart .up .body { fill: var(--card); stroke: var(--ink); stroke-width: 1.2; }
+.replay-chart .down .body { fill: var(--ink); stroke: var(--ink); stroke-width: 1.2; }
+.replay-chart .mark-entry { stroke: var(--cobalt); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.replay-chart .mark-exit { stroke: var(--loss); stroke-width: 1.5; stroke-dasharray: 2 3; }
+.replay-chart .cursor { stroke: var(--ink-2); stroke-width: 1; }
+.replay-controls { gap: 12px; }
+.table-scroll { overflow-x: auto; }
+.ptable.legs th, .ptable.legs td { width: auto; white-space: nowrap; }
+.ptable.legs thead th { font-family: var(--font-mono); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.events { margin: 0; padding: 0 0 0 1.2em; display: grid; gap: 4px; max-height: 220px; overflow: auto; }
+.events .mono { margin-right: 6px; }

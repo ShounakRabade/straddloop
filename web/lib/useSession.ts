@@ -10,10 +10,10 @@ export function useSession(): { session: Session | null; ready: boolean } {
   useEffect(() => {
     const sb = supabase();
     if (!sb) { setReady(true); return; }
-    sb.auth.getSession().then(({ data }) => { setSession(data.session); setReady(true); });
+    sb.auth.getSession().then(({ data }) => setSession(data.session)).catch(() => undefined).finally(() => setReady(true));
     const { data: sub } = sb.auth.onAuthStateChange((event, next) => {
       setSession(next);
-      if (event === 'SIGNED_IN') void syncLocalToCloud();
+      if (event === 'SIGNED_IN') syncLocalToCloud().catch(() => undefined);
     });
     return () => sub.subscription.unsubscribe();
   }, []);

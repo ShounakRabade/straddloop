@@ -9,10 +9,13 @@ export const unitWord = (r: RunResult, n = 1) => (r.unit === 'day' ? (n === 1 ? 
 /** One plain-language reading of a run: what the interval does and does not allow you to say. */
 export function verdict(r: RunResult): { head: string; body: string } {
   const [lo, hi] = r.ci, range = `${inr(lo, { sign: true })} to ${inr(hi, { sign: true })}`;
+  const sample = r.data ? 'these real NIFTY days' : 'this synthetic sample';
+  const fills = r.data ? ' Fills come from 1-minute candles with no bid/ask, so real trading would likely do worse.' : '';
   if (!r.traded) return { head: 'No trades were taken.', body: 'With these settings the entry rule never passed. Loosen a filter or lengthen the sample.' };
-  if (lo > 0) return { head: 'Positive on this synthetic sample, and the range stays above zero.', body: `The average ${unitWord(r)} sits between ${range} with 95% confidence. That is a property of the model's assumptions until real data agrees. Try another market seed before believing it.` };
-  if (hi < 0) return { head: 'A reliable loss on this synthetic sample.', body: `The average ${unitWord(r)} sits between ${range} with 95% confidence. The whole range is below zero, so this is not bad luck in the sample.` };
-  return { head: 'This run cannot tell profit from luck.', body: `The average ${unitWord(r)} sits between ${range} with 95% confidence. The range includes zero, so a different ${r.sessions} ${r.unit === 'month' ? 'stock-months' : 'sessions'} could show the opposite sign.` };
+  if (r.traded < 2) return { head: 'One trade is not evidence.', body: `Widen the date range: a single ${unitWord(r)} cannot show whether the rule has an edge.${fills}` };
+  if (lo > 0) return { head: `Positive on ${sample}, and the range stays above zero.`, body: `The average ${unitWord(r)} sits between ${range} with 95% confidence.${r.data ? ' Check a different period before believing it.' : " That is a property of the model's assumptions until real data agrees. Try another market seed before believing it."}${fills}` };
+  if (hi < 0) return { head: `A reliable loss on ${sample}.`, body: `The average ${unitWord(r)} sits between ${range} with 95% confidence. The whole range is below zero, so this is not bad luck in the sample.${fills}` };
+  return { head: 'This run cannot tell profit from luck.', body: `The average ${unitWord(r)} sits between ${range} with 95% confidence. The range includes zero, so a different ${r.sessions} ${r.unit === 'month' ? 'stock-months' : 'sessions'} could show the opposite sign.${fills}` };
 }
 
 export function Kpis({ r }: { r: RunResult }) {

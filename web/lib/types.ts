@@ -22,6 +22,17 @@ export interface RunResult {
   exits: Record<string, number>;
   curve: { d: string; v: number; p: number }[];
   extra: [string, string | number][];
+  /** Present when the run used real day files instead of the synthetic model. */
+  data?: { source: 'dhan'; from: string; to: string; days: number; lot_sizes: number[]; lot_source: string; expiry_source: string; flags: string[] };
+}
+
+export interface ReplayLeg { side: string; strike: number; kind: string; entry_t: number; entry_px: number; exit_t: number | null; exit_px: number | null; exit_reason: string | null; stop: number | null; net: number }
+export interface Replay {
+  strategy: 'straddle' | 'orb'; date: string; status: string; reason: string | null; net?: number; gross?: number; costs?: number;
+  exit_reason?: string; expiry?: string; lot_size?: number; qty?: number; flags: string[];
+  or_high: number | null; or_low: number | null; decision_t?: number | null;
+  candles: { t: number; o: number; h: number; l: number; c: number }[];
+  mtm: { t: number; v: number }[]; legs: ReplayLeg[]; events: { t: number; kind: string; text: string }[];
 }
 
 export interface RunSummary {

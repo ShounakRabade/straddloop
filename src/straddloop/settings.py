@@ -51,6 +51,8 @@ class Settings:
             "home": str(self.home),
             "dhan_credentials": "set" if self.has_dhan_credentials else "missing",
             "dhan_requests_per_second": self.dhan_requests_per_second,
+            "supabase_url": "set" if os.environ.get("SUPABASE_URL") else "missing",
+            "supabase_secret_key": "set" if os.environ.get("SUPABASE_SECRET_KEY") else "missing",
         }
 
 

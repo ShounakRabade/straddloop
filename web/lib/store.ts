@@ -24,8 +24,10 @@ export function summarise(r: RunResult): RunSummary {
 async function userId(): Promise<string | null> {
   const sb = supabase();
   if (!sb) return null;
-  const { data } = await sb.auth.getSession();
-  return data.session?.user.id ?? null;
+  try {
+    const { data } = await sb.auth.getSession();
+    return data.session?.user.id ?? null;
+  } catch { return null; }
 }
 
 export function getLocalProfile(): Profile { return read<Profile>(PROFILE_KEY, emptyProfile); }
@@ -34,7 +36,7 @@ export async function saveProfile(patch: Partial<Profile>): Promise<Profile> {
   const next = { ...getLocalProfile(), ...patch };
   write(PROFILE_KEY, next);
   const uid = await userId();
-  if (uid) await supabase()!.from('profiles').upsert({ id: uid, ...next, updated_at: new Date().toISOString() });
+  if (uid) { try { await supabase()!.from('profiles').upsert({ id: uid, ...next, updated_at: new Date().toISOString() }); } catch { /* the local copy is enough */ } }
   return next;
 }
 

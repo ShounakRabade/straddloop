@@ -10,7 +10,7 @@
   // ------------------------------------------------------------------ config
   const DEFAULTS = {
     symbol: 'NIFTY', session_open: '09:15', exit_time: '15:15', lots: 1, tick: 0.05, expiry_choice: 'nearest',
-    or_minutes: 30, candle_minutes: 5, entry_mode: 'confirm', entry_condition: 'full',
+    or_minutes: 30, candle_minutes: 5, entry_mode: 'confirm', entry_condition: 'full', strike_offset: 0,
     sl_pct: 36.0, stop_type: 'leg', stop_fill: 'gap_aware',
     target_mode: 'strategy', target_basis: 'absolute', target_per_lot: 1000.0, target_pct: 30.0, max_loss_per_lot: 0.0,
     reentry_enabled: true, max_reentries_per_side: 1, reentry_trigger: 'on_stop', opposite_decay_pct: 66.0,
@@ -179,10 +179,20 @@
     const [ex, strikes] = choices[pick];
     let atm = strikes[0];
     for (const k of strikes) if (Math.abs(k - spot) < Math.abs(atm - spot)) atm = k;
-    const ce = ex.contracts['CE:' + atm], pe = ex.contracts['PE:' + atm];
+    // strike_offset (website addition, default 0 = the original ATM straddle): sell the call N strikes
+    // above ATM and the put N strikes below (a strangle); negative N sells both legs in the money.
+    let ceK = atm, peK = atm;
+    if (cfg.strike_offset) {
+      let step = Infinity;
+      for (let j = 1; j < strikes.length; j++) step = Math.min(step, strikes[j] - strikes[j - 1]);
+      ceK = atm + cfg.strike_offset * step; peK = atm - cfg.strike_offset * step;
+      const okK = k => ex.contracts[k] && ex.contracts[k].o[ei] != null;
+      if (!isFinite(step) || !okK('CE:' + ceK) || !okK('PE:' + peK)) { res.reason = 'offset strike has no price at entry'; return res; }
+    }
+    const ce = ex.contracts['CE:' + ceK], pe = ex.contracts['PE:' + peK];
     const isExpiryDay = ex.expiry === s.date;
     const dte = dayDiff(s.date, ex.expiry);
-    Object.assign(res, { expiry: ex.expiry, lot_size: ex.lot_size, atm, is_expiry_day: isExpiryDay, dte });
+    Object.assign(res, { expiry: ex.expiry, lot_size: ex.lot_size, atm, ce_strike: ceK, pe_strike: peK, is_expiry_day: isExpiryDay, dte });
 
     const orWidthPct = 100 * (res.or_full_high - res.or_full_low) / spot;
     const straddleRef = ce.o[ei] + pe.o[ei];
@@ -208,7 +218,7 @@
         reason, intrabar: !!intrabar, cost: c.total, costs: c, kind: leg.kind, stop: leg.stop });
       return c.total;
     };
-    for (const side of SIDES) ctx.pending.push({ type: 'sell', side, strike: atm, kind: 'initial' });
+    for (const side of SIDES) ctx.pending.push({ type: 'sell', side, strike: side === 'CE' ? ceK : peK, kind: 'initial' });
     ctx.event(T, 'entry_check', `${cfg.entry_condition} condition passed; ATM ${atm} at spot ${spot.toFixed(2)}`);
 
     res.status = 'traded';

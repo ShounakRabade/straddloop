@@ -16,17 +16,29 @@
     return memo(`cal:${days}:${seed}:${iv}`, () => E.syntheticCalendar(days, { iv }, seed));
   }
 
-  function straddle(p) {
-    const cfg = E.makeConfig({
+  // Settings shared by both intraday strategies: lots, strike offset and fill slippage.
+  // The Lab's strike_offset counts strikes OUT of the money (+) or IN the money (-) for every leg.
+  // The straddle engine already reads it that way; the ORB engine counts +N as in the money, so it is flipped.
+  function common(p, flip) {
+    const off = Math.round(num(p.strike_offset, 0));
+    return { lots: Math.max(1, Math.round(num(p.lots, 1))), strike_offset: flip ? -off : off, slip_pct: num(p.slip_pct, 0.5) };
+  }
+
+  let last = null;  // the latest run's per-day results, for the day replay
+
+  function straddle(p, sessions) {
+    const cfg = E.makeConfig(Object.assign({
       sl_pct: num(p.sl_pct, 36), target_per_lot: num(p.target_per_lot, 1000),
       reentry_enabled: p.reentry_enabled !== false, entry_condition: p.entry_condition || 'full',
-    });
-    const bt = E.runBacktest(calendar(p), cfg), m = bt.metrics;
+    }, common(p)));
+    const bt = E.runBacktest(sessions || calendar(p), cfg), m = bt.metrics;
+    last = { strategy: 'straddle', results: bt.results, cfg };
     const exits = {};
     bt.results.forEach(r => { if (r.status === 'traded') exits[r.exit_reason] = (exits[r.exit_reason] || 0) + 1; });
     return {
       strategy: 'straddle', unit: 'day', sessions: m.sessions_total, traded: m.sessions_traded,
-      net: m.net_pnl, gross: m.gross_pnl, costs: m.costs, avg: m.avg_daily_pnl, ci: m.ci95_mean, t: m.t_stat_mean,
+      net: m.net_pnl || 0, gross: m.gross_pnl || 0, costs: m.costs || 0, avg: m.avg_daily_pnl || 0,
+      ci: m.ci95_mean || [m.avg_daily_pnl || 0, m.avg_daily_pnl || 0], t: m.t_stat_mean,
       winRate: m.win_rate, maxDD: m.max_drawdown, worst: m.largest_loss, best: m.largest_win,
       profitFactor: m.profit_factor, exits,
       curve: m.equity_curve.map(e => ({ d: e.date, v: e.cum, p: e.pnl })),
@@ -38,18 +50,20 @@
     };
   }
 
-  function orb(p) {
+  function orb(p, sessions) {
     const basis = p.target_basis || 'premium';
-    const cfg = E.ORB.makeConfig({
+    const cfg = E.ORB.makeConfig(Object.assign({
       target_points: num(p.target_points, 30), stop_buffer: num(p.stop_buffer, 0),
       breakout_def: p.breakout_def || 'wick', target_basis: basis,
-    });
-    const run = E.ORB.run(calendar(p), cfg), m = run.metrics;
+    }, common(p, true)));
+    const run = E.ORB.run(sessions || calendar(p), cfg), m = run.metrics;
+    last = { strategy: 'orb', results: run.results, cfg };
     const lo = m.expectancy - 1.96 * (m.trade_t_stat ? Math.abs(m.expectancy / m.trade_t_stat) : 0);
     const hi = m.expectancy + 1.96 * (m.trade_t_stat ? Math.abs(m.expectancy / m.trade_t_stat) : 0);
     return {
       strategy: 'orb', unit: 'trade', sessions: m.sessions_total, traded: m.trades,
-      net: m.net_pnl, gross: m.gross_pnl, costs: m.costs, avg: m.expectancy, ci: [lo, hi], t: m.trade_t_stat,
+      net: m.net_pnl || 0, gross: m.gross_pnl || 0, costs: m.costs || 0, avg: m.expectancy || 0,
+      ci: [lo || 0, hi || 0], t: m.trade_t_stat,
       winRate: m.trade_win_rate, maxDD: m.max_drawdown, worst: m.largest_loss, best: m.largest_win,
       profitFactor: m.trade_profit_factor, exits: m.trade_exit_reasons || {},
       curve: m.equity_curve.map(e => ({ d: e.date, v: e.cum, p: e.pnl })),
@@ -98,5 +112,23 @@
     });
   }
 
-  return { run: p => ({ straddle, orb, fourleg })[p.strategy](p), scenarios };
+  /** Everything needed to replay one day of the latest straddle or ORB run, kept small for postMessage. */
+  function replay(date) {
+    if (!last) return null;
+    const r = last.results.find(x => x.date === date);
+    if (!r) return null;
+    const legs = (r.legs || r.trades || []).map(l => ({
+      side: l.side || l.cp, strike: l.strike, kind: l.kind || (l.dir === 1 ? 'long call' : 'long put'),
+      entry_t: l.entry_t, entry_px: l.entry_px, exit_t: l.exit_t, exit_px: l.exit_px, exit_reason: l.exit_reason,
+      stop: l.stop != null ? l.stop : null, net: l.net }));
+    return {
+      strategy: last.strategy, date: r.date, status: r.status, reason: r.reason, net: r.net, gross: r.gross, costs: r.costs,
+      exit_reason: r.exit_reason, expiry: r.expiry, lot_size: r.lot_size, qty: r.qty, flags: r.flags || [],
+      or_high: r.or_high, or_low: r.or_low, decision_t: r.decision_t, candles: (r.candles || []).map(c => ({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c })),
+      mtm: (r.mtm || []).map(x => ({ t: x.t, v: x.net })), legs,
+      events: (r.events || []).map(e => ({ t: e.t, kind: e.kind, text: e.text })),
+    };
+  }
+
+  return { run: (p, sessions) => ({ straddle, orb, fourleg })[p.strategy](p, sessions), scenarios, replay };
 });

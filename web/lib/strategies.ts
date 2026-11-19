@@ -23,6 +23,15 @@ export interface Strategy {
   fields: Field[];
 }
 
+/** Keys of the synthetic-model settings. They are hidden when the Lab runs on real data. */
+export const SYNTHETIC_KEYS = ['days', 'seed', 'iv'];
+
+const trade = (offsetHelp: string): Field[] => [
+  { key: 'lots', label: 'Lots', help: 'Lots per leg. Quantity = lots × lot size; costs and the per-lot target scale with it.', kind: 'range', min: 1, max: 20, step: 1 },
+  { key: 'strike_offset', label: 'Strike', help: offsetHelp, kind: 'range', min: -5, max: 5, step: 1, unit: ' from ATM' },
+  { key: 'slip_pct', label: 'Slippage per fill', help: 'Taken off every sell and added to every buy, on top of the candle price. Stops pay double. Real data has no bid/ask, so keep this above zero.', kind: 'range', min: 0, max: 3, step: 0.25, unit: '%' },
+];
+
 const sample: Field[] = [
   { key: 'days', label: 'Sessions', help: 'How many synthetic trading days to run.', kind: 'choice',
     options: [{ value: 60, label: '60' }, { value: 120, label: '120' }, { value: 240, label: '240' }] },
@@ -64,13 +73,14 @@ export const STRATEGIES: Strategy[] = [
     ],
     synthetic: 'On 120 synthetic sessions it traded 63 days, won 71% of them and still lost ₹32,791 after costs: the average losing day was about four times the average winner. Re-entry legs lost money at every implied-vol level tested.',
     experiments: ['Original rules on 2+ years of real data, with costs for the period', 'Re-entry on against re-entry off', 'Stop sweep from 20% to 75%: look for a plateau, not a peak', 'Target against no target, plus a daily loss cap', 'Slippage from 0 to 2%: if the result dies at 1%, it is not tradeable'],
-    defaults: { strategy: 'straddle', days: 120, seed: 1, iv: 13, sl_pct: 36, target_per_lot: 1000, reentry_enabled: true, entry_condition: 'full' },
+    defaults: { strategy: 'straddle', days: 120, seed: 1, iv: 13, sl_pct: 36, target_per_lot: 1000, reentry_enabled: true, entry_condition: 'full', lots: 1, strike_offset: 0, slip_pct: 0.5 },
     fields: [
       { key: 'sl_pct', label: 'Stop per leg', help: 'How far above its sell price a leg may rise before it is bought back.', kind: 'range', min: 20, max: 75, step: 1, unit: '%' },
       { key: 'target_per_lot', label: 'Profit target per lot', help: 'Net of costs. Everything closes when this is reached.', kind: 'range', min: 500, max: 3000, step: 100, prefix: '₹' },
       { key: 'reentry_enabled', label: 'Re-entry after a stop', help: 'Sell a replacement leg when one side is stopped.', kind: 'choice', options: [{ value: true, label: 'On' }, { value: false, label: 'Off' }] },
       { key: 'entry_condition', label: 'Entry candle must', help: 'How strictly the 09:45 candle has to sit inside the opening range.', kind: 'choice',
         options: [{ value: 'full', label: 'Stay fully inside' }, { value: 'body', label: 'Body inside' }, { value: 'close', label: 'Close inside' }, { value: 'overlap', label: 'Touch the range' }] },
+      ...trade('0 sells the ATM straddle. +N sells the call N strikes above and the put N strikes below ATM (a strangle); −N sells both in the money.'),
       ...sample,
     ],
   },
@@ -108,7 +118,7 @@ export const STRATEGIES: Strategy[] = [
     ],
     synthetic: 'On 120 synthetic sessions it traded every day, won 35% of trades and lost ₹14,372. 86% of trades left on the reversal level after about 14 minutes. Of 29 variants tried, none was distinguishable from zero except taking a second trade, which was reliably worse.',
     experiments: ['Wick breakout against close and strong-body breakouts', 'Reversal definition and buffer of 0, 5 and 10 points', 'Premium target against index target against no target', 'ATM against one strike in the money', 'Regimes by gap and opening-range width, then walk-forward'],
-    defaults: { strategy: 'orb', days: 120, seed: 1, iv: 13, target_points: 30, stop_buffer: 0, breakout_def: 'wick', target_basis: 'premium' },
+    defaults: { strategy: 'orb', days: 120, seed: 1, iv: 13, target_points: 30, stop_buffer: 0, breakout_def: 'wick', target_basis: 'premium', lots: 1, strike_offset: 0, slip_pct: 0.5 },
     fields: [
       { key: 'target_points', label: 'Target', help: 'Premium points above the entry price.', kind: 'range', min: 10, max: 80, step: 5, unit: ' pts' },
       { key: 'stop_buffer', label: 'Stop buffer', help: 'Index points of room beyond the reversal candle before exiting.', kind: 'range', min: 0, max: 30, step: 1, unit: ' pts' },
@@ -116,6 +126,7 @@ export const STRATEGIES: Strategy[] = [
         options: [{ value: 'wick', label: 'A wick beyond the range' }, { value: 'close', label: 'A close beyond the range' }, { value: 'body_strength', label: 'A strong-body close' }] },
       { key: 'target_basis', label: 'Profit target', help: 'Turn the target off to exit only on the reversal level or at day end.', kind: 'choice',
         options: [{ value: 'premium', label: 'On' }, { value: 'none', label: 'Off' }] },
+      ...trade('0 buys the ATM option. +N buys N strikes out of the money, −N in the money.'),
       ...sample,
     ],
   },

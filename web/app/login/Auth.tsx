@@ -2,7 +2,7 @@
 import { useRouter } from 'next/navigation';
 import { useEffect, useState, type FormEvent } from 'react';
 import { Button, ButtonLink, hard } from '@/components/ui';
-import { cloudEnabled, supabase } from '@/lib/supabase';
+import { cloudEnabled, cloudProblem, supabase } from '@/lib/supabase';
 import { useSession } from '@/lib/useSession';
 
 type Mode = 'signin' | 'signup';
@@ -10,6 +10,7 @@ const friendly = (msg: string) => {
   if (/invalid login/i.test(msg)) return 'That email and password do not match an account. Check them, or use the sign-in link instead.';
   if (/already registered/i.test(msg)) return 'An account with that email already exists. Sign in instead.';
   if (/at least/i.test(msg)) return 'Use a password of at least 8 characters.';
+  if (/failed to fetch|network|load failed/i.test(msg)) return 'Could not reach the account service. Check your connection and try again. If it keeps failing, the Supabase address in the deployment settings may be wrong.';
   if (/rate limit/i.test(msg)) return 'Too many attempts. Wait a minute and try again.';
   return msg;
 };
@@ -30,11 +31,14 @@ export function Auth() {
     if (n && n.startsWith('/') && !n.startsWith('//')) setNext(n);
   }, []);
 
-  if (!cloudEnabled) {
+  if (!cloudEnabled || (ready && !supabase())) {
     return (
       <div className="wrap auth stack" style={{ '--gap': '18px' } as React.CSSProperties}>
         <h1>Accounts are not switched on yet.</h1>
-        <p className="muted">This deployment has no Supabase keys, so Straddloop keeps your runs in this browser. Everything else works the same.</p>
+        <p className="muted">Straddloop is keeping your runs in this browser. Everything else works the same.</p>
+        <p className="notice">{!cloudProblem || cloudProblem === 'not set'
+          ? 'To switch accounts on, add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to the deployment and redeploy.'
+          : `The Supabase settings need a fix: ${cloudProblem} Correct it in the deployment's environment variables and redeploy.`}</p>
         <div><ButtonLink href="/lab" variant="primary" arrow>Open the lab</ButtonLink></div>
       </div>
     );
