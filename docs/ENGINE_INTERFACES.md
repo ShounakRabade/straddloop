@@ -302,7 +302,8 @@ interface DateRange {
   request: { from: string; to: string };     // what the user picked, inclusive
   dataset: { source: 'dhan' | 'synthetic' | 'local'; underlying: string; series: Series; interval: '1m' };
   bounds: { floor: '2023-01-01'; earliest: string | null; latest_validated: string | null; latest_any: string | null };
-  effective: { from: string; to: string };   // request clamped to [max(floor, earliest), latest_any]
+  effective: { from: string; to: string } | null; // request clamped to [floor, min(latest_any, today IST)]; null if nothing left
+  files: { date: string; path: string }[];   // the day files the run downloads (one per runnable date)
   days: DayEntry[];                          // every calendar day in `effective`, weekends included
   counts: Record<DayState, number> & { calendar: number; weekdays: number; runnable: number };
   runnable: string[];                        // the dates that will be handed to the engine
@@ -322,8 +323,14 @@ interface DayEntry {
 Rules: `runnable` = validated + partial days that have a file (partial days run; their gaps stay gaps).
 A weekday with no file is `holiday` when the pipeline recorded one or the (unverified) NSE list names it,
 otherwise `missing`. Weekends are never "missing". The end date is never hardcoded: `bounds.latest_*` come
-from the database for the chosen underlying and series. Presets (`last 7/30/90 trading days`, `6M`, `1Y`,
-`2Y`, `3Y`, `max`) count **runnable** days backwards from `latest_validated`.
+from the database for the chosen underlying and series. Presets end on `latest_any` (the last day a run can
+use). `last_7/30/90` count stored usable days backwards; `6m/1y/2y/3y` start the day after the same calendar
+date N months earlier, clamped to `earliest`; `max` = `earliest` → `latest_any`.
+
+`buildDateRange(request, inventory, statuses, opts)` options: `source` ('dhan' | 'local': local files are
+`partial`, quality unchecked), `underlying`, `series`, `floor` (default 2023-01-01), `today` (default today in
+IST). The NSE holiday list (`NSE_HOLIDAYS_UNVERIFIED`, 2023–2025, recalled, not verified) is built in and
+only labels weekdays that have no file.
 
 Every surface reads this one object: the calendar shades `days`, the run downloads `runnable`, progress
 counts `runnable.length`, the result carries `range.key`, and the report prints `counts`. The run result's
@@ -337,7 +344,8 @@ inventory(underlying, series): Promise<Availability>          // existing: every
 statuses(underlying, series): Promise<StatusRow[]>            // existing: market_day_status rows, [] if the table is absent
 datasetBounds(underlying, series): Promise<{ earliest; latest_validated; latest_any; days }>   // NEW
 buildDateRange(request, inventory, statuses, opts): DateRange // NEW, pure (lib/dateRange.ts)
-presetRange(preset, range): { from; to }                      // NEW, pure
+presetRange(preset, inventory, statuses): { from; to } | null   // NEW, pure
+loadCommand(range): string | null                             // NEW: `straddloop load …` for what is missing
 ```
 
 `latest_validated` = the latest `trade_date` whose status is `validated` (or, without a status row, whose
