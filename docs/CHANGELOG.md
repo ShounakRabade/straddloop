@@ -16,6 +16,9 @@
 
 ## Unreleased: real NIFTY data on the website
 
+* `straddloop load --start … --end …`: pull from Dhan (resumable) and upload in one command, dates typed once
+  (inclusive). The Lab shows this command pre-filled when the picked dates are not stored yet.
+
 * Day files: `straddloop supabase-upload` turns the local Parquet store into one gzip JSON file per
   trading day per expiry series (about 100 KB) in the private Supabase bucket `market-data`, plus a
   `market_days` row each. Resumable by checksum. `straddloop export-days` writes the same files locally.

@@ -42,8 +42,10 @@ about 100 million rows for five years, far beyond the free plan's 500 MB.
 1. Run `supabase/market_data.sql` once in the SQL editor (put your sign-in email on the last line).
 2. On your computer, in the repository root, add `SUPABASE_URL` and `SUPABASE_SECRET_KEY` to `.env`
    (secret key: Project settings > API keys; it never goes in Vercel or Git).
-3. `straddloop supabase-upload --underlying NIFTY --expiry WEEK --start 2025-10-06 --end 2025-10-17`.
-   Re-running skips days that are already up to date.
+3. `straddloop load --expiry WEEK --start 2025-10-06 --end 2025-10-17` pulls those days from Dhan
+   (resumable) and uploads them. Dates are inclusive, and re-running skips what is done. The Lab shows this
+   exact command, filled in, when you pick dates that are not stored yet. (`supabase-upload` alone uploads
+   what you already pulled.)
 4. Sign in on the site, open the Lab and pick **Real NIFTY (Dhan)**.
 
 Offline: `straddloop export-days ...` writes the same files under `data/dayfiles/`; the Lab's
