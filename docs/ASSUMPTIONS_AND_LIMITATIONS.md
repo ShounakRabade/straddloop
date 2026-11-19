@@ -5,7 +5,8 @@
 | Id | Assumption | Why | Effect if wrong |
 | --- | --- | --- | --- |
 | A1 | Candles are labelled by start time, IST | Dhan's documented example timestamp is 09:15 IST | Every decision shifts by one bar; the coverage report checks the label on real data |
-| A2 | Dhan's ATM+-10 window applies to expiry code 1 of index options | "Near expiry" in Dhan's docs | Requests for wider windows fail loudly, not silently |
+| A2 | Dhan's ATM+-10 window applies to expiry code 1 of index options | "Near expiry" in Dhan's docs; confirmed for NIFTY WEEK code 1 on 6-17 Oct 2025 (ATM+-10 returned, ATM+11 empty) | Requests for wider windows fail loudly, not silently |
+| A3 | NIFTY WEEK code 1 is the current week's contract up to and including its expiry day | 6-17 Oct 2025 sample: the 09:20 ATM straddle is smallest on Tuesdays (7, 14 Oct, the weekly expiry) and jumps on Wednesday | Wrong DTE and wrong expiry-day filter; confirmed against bhavcopy expiry dates in a later step |
 | A3 | Brokerage ₹20 per executed order | Flat-fee brokers on the shortlist | Scales costs linearly; configurable |
 | A4 | NSE cost schedule from 1 Apr 2026: STT 0.15% of sell premium, exchange 0.03553%, SEBI ₹10/crore, stamp 0.003% on buys, GST 18% | Verified on 22 Oct 2026 | The date the 0.03553% exchange charge started is not yet confirmed |
 | A5 | NSE cost schedule 1 Oct 2024 to 31 Mar 2026: STT 0.10%; other rates as in the code | STT verified; exchange, SEBI and stamp not yet verified | Flagged `all_rates_verified = False` on every affected result |

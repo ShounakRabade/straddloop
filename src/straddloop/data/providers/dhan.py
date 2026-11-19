@@ -23,7 +23,7 @@ import json
 import logging
 import time as _time
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -171,7 +171,7 @@ class DhanProvider:
         near = spec.option_instrument == "OPTIDX" and request.expiry_code == 1
         check_moneyness(request.moneyness, near_expiry_index=near)
         out: list[OptionCandle] = []
-        for w_start, w_end in date_windows(request.start, request.end, 30):
+        for day in _weekdays(request.start, request.end):
             body = {
                 "exchangeSegment": spec.fno_segment,
                 "interval": str(request.interval_min),
@@ -182,12 +182,24 @@ class DhanProvider:
                 "strike": request.moneyness,
                 "drvOptionType": "CALL" if request.option_type == "CE" else "PUT",
                 "requiredData": OPTION_FIELDS,
-                "fromDate": w_start.isoformat(),
-                "toDate": w_end.isoformat(),
+                # Verified live 19 Nov 2026: fromDate == toDate returns exactly that day; any span over
+                # one day is refused with DH-905, despite the docs' "30 days" and "toDate exclusive".
+                "fromDate": day.isoformat(),
+                "toDate": day.isoformat(),
             }
             payload = self._post("/charts/rollingoption", body)
             out.extend(parse_rolling_option(payload, request))
         return out
+
+
+def _weekdays(start: date, end: date) -> list[date]:
+    """Each Monday-Friday in [start, end) (end exclusive, like every other date range here)."""
+    out, d = [], start
+    while d < end:
+        if d.weekday() < 5:
+            out.append(d)
+        d += timedelta(days=1)
+    return out
 
 
 def _spec(underlying: str) -> DhanUnderlying:

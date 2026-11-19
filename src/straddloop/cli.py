@@ -37,41 +37,37 @@ def cmd_dhan_check_ids(args, settings) -> int:
 
 
 def cmd_dhan_sample(args, settings) -> int:
-    from straddloop.data import store
+    """Resumable pull (index + options, one day per option call), then the quality and coverage reports."""
     from straddloop.data.coverage import write_report
-    from straddloop.data.providers.base import ExpiredOptionRequest
-    from straddloop.data.providers.dhan import DhanProvider, moneyness_labels
-    from straddloop.data.schema import OptionCandle, UnderlyingCandle
-    from straddloop.data.validate import validate_candles
+    from straddloop.data.providers.dhan import DhanProvider
+    from straddloop.data.pull import pull_options, pull_underlying
 
     provider = DhanProvider(
         settings.dhan_client_id, settings.dhan_access_token, settings.raw_dir, settings.dhan_requests_per_second
     )
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
-    log.info("Pulling %s index candles %s to %s", args.underlying, start, end)
-    under = validate_candles(provider.underlying_candles(args.underlying, start, end, args.interval))
-    store.write_records(settings.store_dir, "underlying_candles", under.kept, UnderlyingCandle)
-    log.info("Underlying: kept %d rows, dropped %s", len(under.kept), dict(under.dropped))
+    log.info("Pulling %s index candles %s to %s (end exclusive)", args.underlying, start, end)
+    pull_underlying(provider, settings.store_dir, args.underlying, start, end, args.interval)
+    calls = 2 * (2 * args.window + 1)
+    log.info("Pulling %s %s code %d options, ATM+-%d (%d calls per day)", args.underlying, args.expiry_flag,
+             args.expiry_code, args.window, calls)
+    s = pull_options(provider, settings.store_dir, args.underlying, start, end, args.window, args.expiry_flag,
+                     args.expiry_code, args.interval, refetch=args.refetch)
+    log.info("Options: %d days fetched, %d already done, %d with no data; %d rows; dropped %s",
+             len(s.days_fetched), len(s.days_skipped), len(s.holidays), s.option_rows, dict(s.dropped))
+    write_report(settings.store_dir, settings.reports_dir)
+    return cmd_dhan_quality(args, settings)
 
-    for option_type in ("CE", "PE"):
-        for label in moneyness_labels(args.window):
-            req = ExpiredOptionRequest(
-                underlying=args.underlying,
-                option_type=option_type,
-                moneyness=label,
-                expiry_flag=args.expiry_flag,
-                expiry_code=args.expiry_code,
-                start=start,
-                end=end,
-                interval_min=args.interval,
-            )
-            res = validate_candles(provider.expired_option_candles(req))
-            store.write_records(settings.store_dir, "option_candles", res.kept, OptionCandle)
-            log.info("%s %s: kept %d rows, dropped %s", option_type, label, len(res.kept), dict(res.dropped))
 
-    j, m = write_report(settings.store_dir, settings.reports_dir)
-    print(f"Coverage report written to {m} and {j}")
-    return 0
+def cmd_dhan_quality(args, settings) -> int:
+    from straddloop.data.quality import build_quality, write_quality
+
+    report = build_quality(settings.store_dir, args.underlying, args.expiry_flag, args.expiry_code, args.window,
+                           args.interval, date.fromisoformat(args.start), date.fromisoformat(args.end))
+    _, m = write_quality(report, settings.reports_dir)
+    print(m.read_text(encoding="utf-8"))
+    print(f"Written to {m}")
+    return 0 if report["overall"] == "PASS" else 1
 
 
 def cmd_import_bhavcopy(args, settings) -> int:
@@ -113,14 +109,20 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="show settings (secrets reported as set or missing only)")
     sub.add_parser("dhan-check-ids", help="confirm index security ids from Dhan's scrip master")
 
-    s = sub.add_parser("dhan-sample", help="pull a Phase 2 sample from Dhan and write a coverage report")
-    s.add_argument("--underlying", default="NIFTY", choices=["NIFTY", "BANKNIFTY", "SENSEX"])
-    s.add_argument("--start", required=True, help="YYYY-MM-DD, inclusive")
-    s.add_argument("--end", required=True, help="YYYY-MM-DD, exclusive")
-    s.add_argument("--interval", type=int, default=1)
-    s.add_argument("--window", type=int, default=10, help="strikes either side of ATM")
-    s.add_argument("--expiry-flag", default="WEEK", choices=["WEEK", "MONTH"])
-    s.add_argument("--expiry-code", type=int, default=1)
+    for name, help_text in (
+        ("dhan-sample", "pull index + expired options from Dhan (resumable), then write the quality report"),
+        ("dhan-quality", "rebuild the quality report for a range from what is stored"),
+    ):
+        s = sub.add_parser(name, help=help_text)
+        s.add_argument("--underlying", default="NIFTY", choices=["NIFTY", "BANKNIFTY", "SENSEX"])
+        s.add_argument("--start", required=True, help="YYYY-MM-DD, inclusive")
+        s.add_argument("--end", required=True, help="YYYY-MM-DD, exclusive")
+        s.add_argument("--interval", type=int, default=1)
+        s.add_argument("--window", type=int, default=10, help="strikes either side of ATM")
+        s.add_argument("--expiry-flag", default="WEEK", choices=["WEEK", "MONTH"])
+        s.add_argument("--expiry-code", type=int, default=1, help="1 = nearest (Dhan refuses 0)")
+        if name == "dhan-sample":
+            s.add_argument("--refetch", action="store_true", help="fetch days again even if already done")
 
     b = sub.add_parser("import-bhavcopy", help="import NSE UDiFF F&O bhavcopy files into the contract master")
     b.add_argument("files", nargs="+")
@@ -139,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "dhan-check-ids": cmd_dhan_check_ids,
         "dhan-sample": cmd_dhan_sample,
+        "dhan-quality": cmd_dhan_quality,
         "import-bhavcopy": cmd_import_bhavcopy,
         "coverage": cmd_coverage,
         "serve": cmd_serve,

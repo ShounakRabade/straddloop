@@ -1,6 +1,7 @@
 """Dhan connector tests. Payloads here are hand-written test fixtures shaped like Dhan's documented
 response, not market data."""
 
+import json
 from datetime import date
 
 import httpx
@@ -59,7 +60,7 @@ def test_date_windows_respect_limits():
     assert all((b - a).days <= 30 for a, b in w)
 
 
-def test_requests_are_chunked_archived_and_secret_free(tmp_path):
+def test_requests_are_one_per_weekday_archived_and_secret_free(tmp_path):
     bodies = []
 
     def handler(request: httpx.Request):
@@ -69,10 +70,11 @@ def test_requests_are_chunked_archived_and_secret_free(tmp_path):
     http = httpx.Client(base_url="https://api.dhan.co/v2", transport=httpx.MockTransport(handler))
     p = DhanProvider("CLIENT", "SECRET-TOKEN-123", tmp_path, requests_per_second=0, http=http)
     p.expired_option_candles(_request(start=date(2025, 1, 1), end=date(2025, 3, 1)))
-    assert len(bodies) == 2  # 59 days -> two 30-day windows
+    assert len(bodies) == 43  # Dhan refuses spans over one day: one call per weekday (23 Jan + 20 Feb)
+    assert all(b.read() and json.loads(b.content)["fromDate"] == json.loads(b.content)["toDate"] for b in bodies)
     assert bodies[0].headers["access-token"] == "SECRET-TOKEN-123"
     archived = list((tmp_path / "dhan").glob("**/*.json"))
-    assert len(archived) == 2
+    assert len(archived) == 43
     assert all("SECRET-TOKEN-123" not in a.read_text() for a in archived)
 
 
