@@ -764,6 +764,25 @@
     ];
   }
 
+  const INERT_SLIP = 'not measurable: the slippage setting changed nothing, because fills use the bid/ask quoted in the data (the synthetic model quotes one; stored real candles do not)';
+  /**
+   * Break-even slippage by bisection on slip_pct between the setting and +5 points. When the slippage rows
+   * equal the as-run row to the rupee, the engine is filling at quoted bid/ask and ignores slip_pct: say so
+   * rather than report a break-even (or "still profitable") that was never tested.
+   */
+  async function breakEvenSlip(p0, rowsS, evalOne, o, tick) {
+    const s0 = Number(p0.slip_pct != null ? p0.slip_pct : 0.5), base = rowsS[0].p;
+    const slipRows = rowsS.filter((r) => r.key === 'slip_plus' || r.key === 'slip_x2');
+    const inert = base.traded > 0 && slipRows.length > 0 && slipRows.every((r) => r.p.net === base.net && r.p.traded === base.traded);
+    if (inert) { slipRows.forEach((r) => { r.inert = true; }); return { break_even_slip: null, break_even_note: INERT_SLIP, base_slip: s0, slip_inert: true }; }
+    if (base.net <= 0) return { break_even_slip: null, break_even_note: base.traded > 0 ? 'already loses at the slippage it was run with' : 'no trades to test', base_slip: s0, slip_inert: false };
+    const netAt = async (x) => { const v = perf(await evalOne(Object.assign({}, p0, { slip_pct: +x.toFixed(3) })), o).net; tick(); return v; };
+    let lo = s0, hi = s0 + 5;
+    if ((await netAt(hi)) > 0) return { break_even_slip: null, break_even_note: `still profitable at ${+(s0 + 5).toFixed(2)}% slippage`, base_slip: s0, slip_inert: false };
+    for (let it = 0; it < 6; it++) { const mid = (lo + hi) / 2; if ((await netAt(mid)) > 0) lo = mid; else hi = mid; }
+    return { break_even_slip: (lo + hi) / 2, break_even_note: null, base_slip: s0, slip_inert: false };
+  }
+
   // ================================================================== studies (orchestration with an injected runner)
   /**
    * runner(params) -> { days: dayRecords[] } for ALL sessions of the run, in date order, synchronously.
@@ -840,18 +859,7 @@
     for (const [name, i] of [['original', 0], ['selected', sel]]) {
       const p0 = evals[i].params, rowsS = [];
       for (const sc of costScenarios(p0)) { const days = await evalOne(Object.assign({}, p0, sc.over)); tick('cost stress'); rowsS.push({ key: sc.key, label: sc.label, p: perf(days, o) }); }
-      // break-even slippage: bisection on slip_pct between the setting and +5 points
-      const s0 = Number(p0.slip_pct != null ? p0.slip_pct : 0.5);
-      const netAt = async (s) => perf(await evalOne(Object.assign({}, p0, { slip_pct: +s.toFixed(3) })), o).net;
-      let be = null, beNote = null;
-      const n0 = rowsS[0].p.net;
-      if (n0 <= 0) beNote = 'already loses at the slippage it was run with';
-      else {
-        let lo = s0, hi = s0 + 5, nhi = await netAt(hi); tick('cost stress');
-        if (nhi > 0) beNote = `still profitable at ${+(s0 + 5).toFixed(2)}% slippage`;
-        else { for (let it = 0; it < 6; it++) { const mid = (lo + hi) / 2; if ((await netAt(mid)) > 0) lo = mid; else hi = mid; tick('cost stress'); } be = (lo + hi) / 2; }
-      }
-      stress[name] = { rows: rowsS, break_even_slip: be, break_even_note: beNote, base_slip: s0 };
+      stress[name] = Object.assign({ rows: rowsS }, await breakEvenSlip(p0, rowsS, evalOne, o, () => tick('cost stress')));
     }
     const mcSel = monteCarlo(evals[sel].days.filter((d) => d.traded).map((d) => d.net), { paths: o.mcPaths, capital: o.capital, seed: 7 });
     const mcOrig = monteCarlo(evals[0].days.filter((d) => d.traded).map((d) => d.net), { paths: o.mcPaths, capital: o.capital, seed: 7 });
@@ -900,17 +908,9 @@
     }
     const rowsS = [];
     for (const sc of costScenarios(base)) rowsS.push({ key: sc.key, label: sc.label, p: perf(sc.key === 'base' ? days : await evalOne(Object.assign({}, base, sc.over)), o) });
-    let be = null, beNote = null;
-    const s0 = Number(base.slip_pct != null ? base.slip_pct : 0.5);
-    if (whole.net <= 0) beNote = 'already loses at the slippage it was run with';
-    else {
-      const netAt = async (s) => perf(await evalOne(Object.assign({}, base, { slip_pct: +s.toFixed(3) })), o).net;
-      let lo = s0, hi = s0 + 5;
-      if ((await netAt(hi)) > 0) beNote = `still profitable at ${+(s0 + 5).toFixed(2)}% slippage`;
-      else { for (let it = 0; it < 6; it++) { const mid = (lo + hi) / 2; if ((await netAt(mid)) > 0) lo = mid; else hi = mid; } be = (lo + hi) / 2; }
-    }
+    const stressOut = Object.assign({ rows: rowsS }, await breakEvenSlip(base, rowsS, evalOne, o, () => {}));
     const mc = monteCarlo(days.filter((d) => d.traded).map((d) => d.net), { paths: o.mcPaths, capital: o.capital });
-    return { version: VERSION, whole, thirds, sensitivity: sens, stress: { rows: rowsS, break_even_slip: be, break_even_note: beNote, base_slip: s0 }, monte_carlo: mc, runs: cache.size, ms: hooks.now() - t0 };
+    return { version: VERSION, whole, thirds, sensitivity: sens, stress: stressOut, monte_carlo: mc, runs: cache.size, ms: hooks.now() - t0 };
   }
 
   // ================================================================== diagnostics
@@ -933,7 +933,8 @@
     if (mk.length >= 3 && p.net > 0) {
       const bestM = mk.sort((a, b) => months[b] - months[a])[0];
       add('concentration', 'best_month_share', 'Share of net profit from the best month', 100 * months[bestM] / p.net, months[bestM] / p.net > 0.6 ? 'warn' : months[bestM] / p.net > 0.35 ? 'watch' : 'ok', `${bestM} contributed ${fmtInr(months[bestM], true)}.`);
-    } else add('concentration', 'best_month_share', 'Share of net profit from the best month', null, 'n/a', `Needs at least 3 months with trades; this run has ${mk.length}.`);
+    } else add('concentration', 'best_month_share', 'Share of net profit from the best month', null, 'n/a',
+      mk.length < 3 ? `Needs at least 3 months with trades; this run has ${mk.length}.` : 'Not meaningful: the run did not make money overall.');
     const ex = Object.entries(p.exits).sort((a, b) => b[1].net - a[1].net);
     if (ex.length && p.net > 0 && ex[0][1].net > 0) add('concentration', 'exit_dependency', `Share of net profit from "${ex[0][0]}" exits`, 100 * ex[0][1].net / p.net, ex[0][1].net / p.net > 1.5 ? 'watch' : 'ok',
       `The other exit types net ${fmtInr(p.net - ex[0][1].net, true)} together.`);
@@ -954,13 +955,13 @@
         `At this payoff a win rate above ${need.toFixed(1)}% breaks even; the run won ${p.win_rate.toFixed(1)}%.`);
     }
     if (p.worst != null && p.mean != null && p.avg_win) add('fragility', 'tail', 'Worst day ÷ average winning day', Math.abs(p.worst) / p.avg_win, Math.abs(p.worst) / p.avg_win > 6 ? 'warn' : Math.abs(p.worst) / p.avg_win > 3 ? 'watch' : 'ok',
-      `The worst day lost ${fmtInr(p.worst)}; it takes ${(Math.abs(p.worst) / p.avg_win).toFixed(1)} average winning days to earn that back.`);
+      `The worst day lost ${fmtInr(Math.abs(p.worst))}; it takes ${(Math.abs(p.worst) / p.avg_win).toFixed(1)} average winning days to earn that back.`);
     const ck = ctx.check || ctx.study;
     const stress = ctx.check ? ctx.check.stress : ctx.study ? ctx.study.stress.selected : null;
     if (stress) {
       if (stress.break_even_slip != null) add('fragility', 'break_even_slip', 'Slippage at which the run stops making money', stress.break_even_slip, stress.break_even_slip - stress.base_slip < 0.5 ? 'warn' : stress.break_even_slip - stress.base_slip < 1 ? 'watch' : 'ok',
         `Run at ${stress.base_slip}% per fill; at about ${stress.break_even_slip.toFixed(2)}% it breaks even.`);
-      else add('fragility', 'break_even_slip', 'Slippage at which the run stops making money', null, stress.break_even_note && stress.break_even_note.startsWith('already') ? 'warn' : 'ok', stress.break_even_note || '');
+      else add('fragility', 'break_even_slip', 'Slippage at which the run stops making money', null, stress.slip_inert ? 'n/a' : stress.break_even_note && stress.break_even_note.startsWith('already') ? 'warn' : 'ok', stress.break_even_note || '');
     }
     const sens = ctx.check ? ctx.check.sensitivity : ctx.study ? ctx.study.sensitivity : null;
     if (sens && sens.length) {
@@ -1035,6 +1036,7 @@
     let cs = null, cv = null, cn = null;
     if (stress) {
       if (stress.break_even_slip != null) { cv = stress.break_even_slip - stress.base_slip; cs = 100 * clamp(cv / 1.5, 0, 1); }
+      else if (stress.slip_inert) cn = 'not measurable on this data: fills use quoted bid/ask, so slippage has no effect';
       else if (stress.break_even_note && stress.break_even_note.startsWith('still')) { cs = 100; cn = stress.break_even_note; }
       else { cs = 0; cn = stress.break_even_note; }
     } else cn = 'run a robustness check or the optimisation lab';
@@ -1070,10 +1072,10 @@
       if (n < 10) return { grade: 'Inconclusive', why: `${n} traded day${n === 1 ? '' : 's'}: no interval or test means anything yet.` };
       if (t == null) return { grade: 'Inconclusive', why: 'No variation in daily results.' };
       const dsr = st && st.dsr ? st.dsr.dsr : null;
-      if (p.ci && p.ci[0] > 0 && (dsr == null || dsr > 0.9) && n >= 30) return { grade: 'Strong', why: `The 95% interval of the average day is above zero (t = ${t.toFixed(2)}, ${cls.label.toLowerCase()} sample)${dsr != null ? ` and survives the deflation for ${st.configs_tested} configurations` : ''}.` };
-      if (p.ci && p.ci[1] < 0) return { grade: 'Strong (negative)', why: `The 95% interval is below zero (t = ${t.toFixed(2)}): the loss is unlikely to be bad luck.` };
-      if (t > 1) return { grade: 'Weak', why: `t = ${t.toFixed(2)}: positive, but the interval still includes zero.` };
-      return { grade: 'None', why: `t = ${t.toFixed(2)}: the average day cannot be told apart from zero.` };
+      if (p.ci && p.ci[0] > 0 && (dsr == null || dsr > 0.9) && n >= 30) return { grade: 'Strong', why: `The 95% interval of the average day is above zero (t = ${fmtT(t)}, ${cls.label.toLowerCase()} sample)${dsr != null ? ` and survives the deflation for ${st.configs_tested} configurations` : ''}.` };
+      if (p.ci && p.ci[1] < 0) return { grade: 'Strong (negative)', why: `The 95% interval is below zero (t = ${fmtT(t)}): the loss is unlikely to be bad luck.` };
+      if (t > 1) return { grade: 'Weak', why: `t = ${fmtT(t)}: positive, but the interval still includes zero.` };
+      return { grade: 'None', why: `t = ${fmtT(t)}: the average day cannot be told apart from zero.` };
     })();
     const robustGroup = c.filter((x) => x.group === 'robustness' && x.score != null);
     const robustAvg = robustGroup.length ? sum(robustGroup.map((x) => x.score * x.weight)) / sum(robustGroup.map((x) => x.weight)) : null;
@@ -1097,6 +1099,9 @@
     const s = INR ? INR.format(Math.round(Math.abs(x))) : String(Math.round(Math.abs(x)));
     return (x < 0 ? '−' : sign && x > 0 ? '+' : '') + '₹' + s;
   }
+  function fmtT(t) { return t == null || !isFinite(t) ? '—' : `${t < 0 ? '−' : ''}${Math.abs(t).toFixed(2)}`; }
+  /** "low sessions", but "other days" rather than "other days sessions". */
+  function sessionsOf(label) { const l = String(label).toLowerCase(); return /days$/.test(l) ? l : `${l} sessions`; }
   const fmtPct = (x, d) => (x == null || !isFinite(x) ? '—' : `${x < 0 ? '−' : ''}${Math.abs(x).toFixed(d == null ? 1 : d)}%`);
   const EXIT_WORDS = { target: 'the profit target', eod: 'the end-of-day exit', time_exit: 'the end-of-day exit', structural: 'the reversal level', scheduled: 'a scheduled exit',
     max_loss: 'the loss cap', stop: 'stops', loss_limit: 'the loss limit', expiry: 'expiry', unknown: 'an unrecorded reason' };
@@ -1148,9 +1153,9 @@
         if (!rows.length) continue;
         const best = rows.slice().sort((a, c) => c.p.mean - a.p.mean)[0], worst = rows.slice().sort((a, c) => a.p.mean - c.p.mean)[0];
         const thin = (r) => (r.p.traded < b.regimes.min_traded ? ` (only ${F(`rg_${key}_${r.label}_n`, `${d.label}: ${r.label} traded days`, r.p.traded, String(r.p.traded))} traded day${r.p.traded === 1 ? '' : 's'}, too few to rely on)` : ` (${F(`rg_${key}_${r.label}_n`, `${d.label}: ${r.label} traded days`, r.p.traded, String(r.p.traded))} traded days)`);
-        if (best.p.mean > 0) say(s2, `${d.label}${d.timing === 'ex-post' ? ', as it turned out' : ', known at entry'}: ${best.label.toLowerCase()} sessions averaged ${F(`rg_${key}_${best.label}_mean`, `${d.label}: ${best.label} average day`, best.p.mean, fmtInr(best.p.mean, true))}${thin(best)}.`,
+        if (best.p.mean > 0) say(s2, `${d.label}${d.timing === 'ex-post' ? ', as it turned out' : ', known at entry'}: ${sessionsOf(best.label)} averaged ${F(`rg_${key}_${best.label}_mean`, `${d.label}: ${best.label} average day`, best.p.mean, fmtInr(best.p.mean, true))}${thin(best)}.`,
           [`rg_${key}_${best.label}_mean`, `rg_${key}_${best.label}_n`]);
-        if (worst !== best && worst.p.mean < 0) say(s3, `${d.label}${d.timing === 'ex-post' ? ', as it turned out' : ', known at entry'}: ${worst.label.toLowerCase()} sessions averaged ${F(`rg_${key}_${worst.label}_mean`, `${d.label}: ${worst.label} average day`, worst.p.mean, fmtInr(worst.p.mean, true))}${thin(worst)}.`,
+        if (worst !== best && worst.p.mean < 0) say(s3, `${d.label}${d.timing === 'ex-post' ? ', as it turned out' : ', known at entry'}: ${sessionsOf(worst.label)} averaged ${F(`rg_${key}_${worst.label}_mean`, `${d.label}: ${worst.label} average day`, worst.p.mean, fmtInr(worst.p.mean, true))}${thin(worst)}.`,
           [`rg_${key}_${worst.label}_mean`, `rg_${key}_${worst.label}_n`]);
       }
     }
@@ -1199,7 +1204,7 @@
       if (e && e.p.traded >= 3 && e.p.mean < 0) next.push([`Test "Skip expiry day": expiry days averaged ${F('rg_expiry_mean', 'Expiry days: average', e.p.mean, fmtInr(e.p.mean, true))}.`, ['rg_expiry_mean']]);
       const vp = b.regimes.dims.find((d) => d.key === 'vol_prev');
       const hot = vp && vp.rows.filter((r) => ['Elevated', 'Extreme'].includes(r.label) && r.p.traded >= 3 && r.p.mean < 0)[0];
-      if (hot) next.push([`Test a volatility filter: sessions after a ${hot.label.toLowerCase()}-volatility day averaged ${F('rg_vp_mean', 'After high-vol days: average', hot.p.mean, fmtInr(hot.p.mean, true))}, and that is known before entry.`, ['rg_vp_mean']]);
+      if (hot) next.push([`Test a volatility filter: sessions after ${/^[aeiou]/i.test(hot.label) ? 'an' : 'a'} ${hot.label.toLowerCase()}-volatility day averaged ${F('rg_vp_mean', 'After high-vol days: average', hot.p.mean, fmtInr(hot.p.mean, true))}, and that is known before entry.`, ['rg_vp_mean']]);
     }
     if (p.costs_pct_gross_profit != null && p.costs_pct_gross_profit > 25) next.push([`Cut the number of fills: charges take ${F('costs_share', 'Charges as % of gross profit', p.costs_pct_gross_profit, fmtPct(p.costs_pct_gross_profit))} of gross profit.`, ['costs_share']]);
     const stress = st ? st.stress.selected : b.check ? b.check.stress : null;

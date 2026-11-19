@@ -246,6 +246,23 @@ test('robustness: 3 traded days reads Inconclusive and is capped; a long clean s
   assert.equal(short.verdict.key, 'inconclusive'); assert.ok(short.score <= 30);
 });
 
+test('cost stress: when slippage changes nothing (fills at quoted bid/ask) it says so instead of reporting a break-even', async () => {
+  const big = dates(60);
+  const quoted = () => ({ days: big.map((d, i) => day(d, 400 + ((i * 37) % 11) * 10)) }); // ignores slip_pct, like the synthetic model's quotes
+  const ck = await A.runCheck({ base: { x: 1, slip_pct: 0.5, brokerage_per_order: 20 }, axes: [], options: { mcPaths: 100 } }, quoted);
+  assert.equal(ck.stress.slip_inert, true);
+  assert.equal(ck.stress.break_even_slip, null);
+  assert.match(ck.stress.break_even_note, /not measurable/);
+  assert.ok(ck.stress.rows.filter((r) => r.key.startsWith('slip')).every((r) => r.inert));
+  const r = A.robustness({ perf: A.perf(quoted().days, { capital: 500000 }), check: ck, data: { sessions: 60 } });
+  const c = r.components.find((x) => x.key === 'costs');
+  assert.equal(c.score, null); // not scored 100 ("still profitable") for a test that never ran
+  // a runner that does react to slippage is not called inert
+  const live = (p) => ({ days: big.map((d) => day(d, 400 - 100 * p.slip_pct)) });
+  const ck2 = await A.runCheck({ base: { x: 1, slip_pct: 0.5, brokerage_per_order: 20 }, axes: [], options: { mcPaths: 100 } }, live);
+  assert.equal(ck2.stress.slip_inert, false); assert.ok(Math.abs(ck2.stress.break_even_slip - 4) < 0.1);
+});
+
 test('assistant: every number it writes comes from a fact it lists, or from a computed result it was given', () => {
   const run = compute.run({ strategy: 'straddle', days: 60, seed: 2, iv: 13 });
   const lr = compute.lastRun();

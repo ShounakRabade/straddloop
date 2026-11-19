@@ -214,6 +214,7 @@ never computed.
 | `engine.js` `sensitivity()` and `walkForward()` exist but nothing calls them; its walk-forward chooses on folds of equal size with no validation window | Low (unused) | Left unchanged (the file mirrors the Python engine); the lab uses `analytics.js` |
 | `engine.js` `regimeTags()` uses one day's return only (±0.5%) | Low (unused) | Superseded by `classify()` |
 | No VIX, IV, event or breadth data anywhere in the store | Data gap | Reported on every regime panel; nothing fabricated |
+| On the synthetic model the Lab's "Slippage per fill" setting changes nothing: synthetic sessions carry bid/ask quotes and the engine fills at them when present (`use_quotes`), ignoring `slip_pct`. Real stored candles have no quotes, so there it applies | Medium (a setting that silently does nothing) | Not changed here (engine behaviour, owned by the engine work). Cost stress detects it: slippage rows are marked "no effect on this data", break-even slippage reads "not measurable" and the robustness component is left unscored rather than scored 100 |
 
 ## 8. Feature status
 
@@ -227,7 +228,7 @@ never computed.
 | Grid and random search, objectives incl. custom weighted, minimum-trade eligibility | implemented-and-tested |
 | Train / validation / held-out test, selection rule | implemented-and-tested (selection ignores the test window) |
 | Walk-forward rolling and anchored | implemented-and-tested (no-leakage test) |
-| Sensitivity, cost stress, break-even slippage, Monte Carlo | implemented-and-tested |
+| Sensitivity, cost stress, break-even slippage, Monte Carlo | implemented-and-tested (break-even reads "not measurable" when slippage has no effect, as on synthetic quotes) |
 | PBO, deflated Sharpe, rank agreement | implemented-and-tested (known cases) |
 | Robustness score with caps and the four separate assessments | implemented-and-tested |
 | Diagnostics | implemented; covered by the end-to-end test |
