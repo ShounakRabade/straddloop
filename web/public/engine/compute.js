@@ -48,6 +48,9 @@
 
   const sumN = xs => xs.reduce((a, b) => a + b, 0);
   function sdOf(xs) { const n = xs.length; if (n < 2) return 0; const m = sumN(xs) / n; return Math.sqrt(sumN(xs.map(x => (x - m) ** 2)) / (n - 1)); }
+  // Two-sided 95% Student t multiplier: at 3 traded days it is 4.30, not 1.96. One day has no interval (null).
+  const T95 = [0, 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042];
+  const t95 = df => (df <= 30 ? T95[df] : df <= 60 ? 2.042 - 0.042 * (df - 30) / 30 : df <= 120 ? 2.0 - 0.02 * (df - 60) / 60 : 1.96);
 
   /** Runs the ledger over a run's results and rewrites the headline figures from it, so the page, the report
    *  and the CSVs all come from one source. Returns the extra fields for the result. */
@@ -67,11 +70,11 @@
     });
     if (base.unit === 'day') {
       const n = dayNets.length, mean = n ? sumN(dayNets) / n : 0, sd = sdOf(dayNets);
-      Object.assign(head, { traded: n, avg: mean, ci: n > 1 ? [mean - 1.96 * sd / Math.sqrt(n), mean + 1.96 * sd / Math.sqrt(n)] : [mean, mean], t: n > 1 && sd > 0 ? mean / (sd / Math.sqrt(n)) : null,
+      Object.assign(head, { traded: n, avg: mean, ci: n > 1 ? [mean - t95(n - 1) * sd / Math.sqrt(n), mean + t95(n - 1) * sd / Math.sqrt(n)] : null, t: n > 1 && sd > 0 ? mean / (sd / Math.sqrt(n)) : null,
         winRate: n ? 100 * wins.length / n : 0, profitFactor: loss.length && sumN(loss) < 0 ? sumN(wins) / -sumN(loss) : null,
         worst: n ? Math.min(...dayNets) : 0, best: n ? Math.max(...dayNets) : 0 });
     } else {
-      Object.assign(head, { traded: perf.closed_positions, avg: perf.expectancy || 0, ci: perf.ci95_trade || [perf.expectancy || 0, perf.expectancy || 0], t: perf.t_stat_trade,
+      Object.assign(head, { traded: perf.closed_positions, avg: perf.expectancy || 0, ci: perf.ci95_trade || null, t: perf.t_stat_trade,
         winRate: perf.win_rate_pct || 0, profitFactor: perf.profit_factor, worst: perf.largest_loss || 0, best: perf.largest_win || 0 });
     }
     head.account = { config: led.acct, report: rep, daily: led.daily, rejections: led.rejections, liquidations: led.liquidations, counts: { trades: led.tradebook.length, fills: led.fills.length } };
@@ -114,14 +117,40 @@
     });
   }
 
-  function straddle(p, sessions) {
-    const cfg = E.makeConfig(Object.assign({
+  // Engine settings the research lab may search that have no Lab field of their own. Only these keys pass
+  // through, and only when present in the parameters, so ordinary Lab runs are unchanged.
+  const ENGINE_EXTRAS = {
+    straddle: ['exit_time', 'reentry_cutoff', 'max_loss_per_lot', 'skip_expiry_day', 'max_or_width_pct', 'min_or_width_pct', 'or_minutes', 'min_iv_proxy'],
+    orb: ['latest_entry', 'exit_time', 'max_hold_minutes', 'confirm_window', 'breakout_buffer'],
+  };
+  function extras(strategy, p) {
+    const o = {};
+    for (const k of ENGINE_EXTRAS[strategy]) if (p[k] !== undefined && p[k] !== '') o[k] = p[k];
+    return o;
+  }
+  /** Statutory-cost stress: scale every dated statutory rate (not brokerage, not the GST rate itself). */
+  function scaledRates(mult) {
+    if (!(mult > 0) || mult === 1) return L.ratesHook;
+    return date => { const r = L.ratesHook(date); return Object.assign({}, r, { stt_sell_pct: r.stt_sell_pct * mult, exch_pct: r.exch_pct * mult, sebi_pct: r.sebi_pct * mult, stamp_buy_pct: r.stamp_buy_pct * mult }); };
+  }
+  function straddleCfg(p) {
+    return E.makeConfig(Object.assign({
       sl_pct: num(p.sl_pct, 36), target_per_lot: num(p.target_per_lot, 1000),
       reentry_enabled: p.reentry_enabled !== false, entry_condition: p.entry_condition || 'full',
-    }, common(p)));
+    }, common(p), extras('straddle', p), p.cost_mult ? { rates_for: scaledRates(Number(p.cost_mult)) } : {}));
+  }
+  function orbCfg(p) {
+    return E.ORB.makeConfig(Object.assign({
+      target_points: num(p.target_points, 30), stop_buffer: num(p.stop_buffer, 0),
+      breakout_def: p.breakout_def || 'wick', target_basis: p.target_basis || 'premium',
+    }, common(p, true), extras('orb', p), p.cost_mult ? { rates_for: scaledRates(Number(p.cost_mult)) } : {}));
+  }
+
+  function straddle(p, sessions) {
+    const cfg = straddleCfg(p);
     const sess = sessions || calendar(p);
     const bt = E.runBacktest(sess, cfg), m = bt.metrics;
-    last = { strategy: 'straddle', results: bt.results, cfg };
+    last = { strategy: 'straddle', results: bt.results, cfg, sessions: sess, params: p };
     const exits = {};
     bt.results.forEach(r => { if (r.status === 'traded') exits[r.exit_reason] = (exits[r.exit_reason] || 0) + 1; });
     return withLedger('straddle', bt.results, bt.config_hash, p, sessions, {
@@ -140,13 +169,10 @@
   }
 
   function orb(p, sessions) {
-    const basis = p.target_basis || 'premium';
-    const cfg = E.ORB.makeConfig(Object.assign({
-      target_points: num(p.target_points, 30), stop_buffer: num(p.stop_buffer, 0),
-      breakout_def: p.breakout_def || 'wick', target_basis: basis,
-    }, common(p, true)));
-    const run = E.ORB.run(sessions || calendar(p), cfg), m = run.metrics;
-    last = { strategy: 'orb', results: run.results, cfg };
+    const cfg = orbCfg(p);
+    const sess = sessions || calendar(p);
+    const run = E.ORB.run(sess, cfg), m = run.metrics;
+    last = { strategy: 'orb', results: run.results, cfg, sessions: sess, params: p };
     const lo = m.expectancy - 1.96 * (m.trade_t_stat ? Math.abs(m.expectancy / m.trade_t_stat) : 0);
     const hi = m.expectancy + 1.96 * (m.trade_t_stat ? Math.abs(m.expectancy / m.trade_t_stat) : 0);
     return withLedger('orb', run.results, run.config_hash, p, sessions, {
@@ -237,5 +263,48 @@
     return { kind, total: rows.length, offset, rows: rows.slice(offset, offset + limit) };
   }
 
-  return { run: (p, sessions) => ({ straddle, orb, fourleg })[p.strategy](p, sessions), scenarios, replay, exportCsv, inspect, dayOutcomes };
+  /**
+   * Research evaluation: the same engine configuration and the same ledger as a Lab run, without touching
+   * the latest run (replay and exports keep pointing at what the page shows). Returns the ledger's daily
+   * rows, the engine's day results reduced to what analytics reads, and the per-fill charge components.
+   * p.cost_mult (stress tests) scales statutory rates in the engine and the same components of the ledger's
+   * charges after booking; margin decisions are not re-simulated for that difference.
+   */
+  function evaluate(p, sessions) {
+    const sess = sessions || calendar(p);
+    let results;
+    if (p.strategy === 'straddle') results = E.runBacktest(sess, straddleCfg(p)).results;
+    else if (p.strategy === 'orb') results = E.ORB.run(sess, orbCfg(p)).results;
+    else throw new Error('Research tools cover the straddle and the opening range breakout only.');
+    const led = L.runLedger(results, accountOf(p), { symbol: sess[0] ? sess[0].symbol : 'NIFTY' });
+    const mult = Number(p.cost_mult) || 1;
+    const daily = mult !== 1 ? stressDaily(led, mult) : led.daily;
+    return { account: { daily, config: led.acct }, results: results.map(slimResult) };
+  }
+  function stressDaily(led, mult) {
+    const extra = {};
+    for (const f of led.fills) {
+      if (!f.charges) continue;
+      const base = (f.brokerage || 0) + (f.exchange || 0) + (f.sebi || 0);
+      const gstStat = base > 0 ? (f.gst || 0) * ((f.exchange || 0) + (f.sebi || 0)) / base : 0;
+      const stat = (f.stt || 0) + (f.exchange || 0) + (f.sebi || 0) + (f.stamp || 0) + gstStat;
+      extra[f.date] = (extra[f.date] || 0) + (mult - 1) * stat;
+    }
+    let shift = 0;
+    return led.daily.map(d => {
+      const x = extra[d.date] || 0; shift += x;
+      return Object.assign({}, d, { charges: d.charges + x, net_realised: d.net_realised - x, closing_balance: d.closing_balance - shift,
+        closing_equity: (d.closing_equity != null ? d.closing_equity : d.closing_balance) - shift });
+    });
+  }
+  const slimResult = r => ({ date: r.date, status: r.status, reason: r.reason || null, exit_reason: r.exit_reason || null,
+    is_expiry_day: r.is_expiry_day != null ? r.is_expiry_day : null, dte: r.dte != null ? r.dte : null, flags: r.flags || [] });
+  /** The latest run, for the research panel: ledger daily rows, slim day results and the sessions it used. */
+  function lastRun() {
+    if (!last || !last.ledger) return null;
+    return { strategy: last.strategy, params: last.params, sessions: last.sessions,
+      account: { daily: last.ledger.daily, config: last.ledger.acct }, results: last.results.map(slimResult) };
+  }
+
+  return { run: (p, sessions) => ({ straddle, orb, fourleg })[p.strategy](p, sessions), scenarios, replay, exportCsv, inspect, dayOutcomes, evaluate, lastRun, ENGINE_EXTRAS };
 });
