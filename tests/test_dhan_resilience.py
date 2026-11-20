@@ -23,19 +23,19 @@ def _provider(tmp_path, responses, sleeps):
                         max_attempts=4)
 
 
-def test_retries_rate_limit_with_growing_backoff_then_succeeds(tmp_path):
+def test_rate_limit_waits_grow_by_minutes_then_succeeds(tmp_path):
     sleeps = []
     p = _provider(tmp_path, [httpx.Response(429, json={"errorCode": "DH-904"})] * 2 + [httpx.Response(200, json={"a": 1})],
                   sleeps)
     assert p._post("/charts/intraday", BODY) == {"a": 1}
-    assert len(sleeps) == 2 and sleeps[1] > sleeps[0] * 0.9 and 1 <= sleeps[0] <= 2 and 2 <= sleeps[1] <= 4
+    assert sleeps == [60.0, 120.0]
 
 
-def test_retry_after_header_is_honoured(tmp_path):
+def test_a_short_retry_after_does_not_cut_the_minute_wait(tmp_path):
     sleeps = []
     p = _provider(tmp_path, [httpx.Response(429, headers={"retry-after": "7"}), httpx.Response(200, json={})], sleeps)
     p._post("/x", BODY)
-    assert sleeps == [7.0]
+    assert sleeps == [60.0]
 
 
 def test_network_errors_are_retried_and_nothing_is_archived_until_success(tmp_path):

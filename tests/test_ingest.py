@@ -8,7 +8,7 @@ from straddloop.data import store
 from straddloop.data.availability import availability, index_key, needs_fetch, option_key, summarize, usable_days
 from straddloop.data.ledger import Ledger
 from straddloop.data.providers.base import AuthError
-from straddloop.data.pull import RunAborted, ensure_range, judge_day, pull_options
+from straddloop.data.pull import ensure_range, judge_day, pull_options
 from tests.fakes import FakeDhan
 
 MON, TUE, WED, THU, FRI = (date(2025, 10, d) for d in (6, 7, 8, 9, 10))
@@ -99,11 +99,12 @@ def test_failed_day_is_recorded_and_retried_next_run(tmp_path):
     assert {x.day: x.state for x in _states(tmp_path)}[TUE] == "validated"
 
 
-def test_three_failures_in_a_row_stop_the_run(tmp_path):
+def test_failures_in_a_row_skip_those_days_and_the_run_goes_on(tmp_path):
     fake = FakeDhan(fail_days=[MON, TUE, WED])
-    with pytest.raises(RunAborted):
-        _fill(tmp_path, fake, MON, FRI)
-    assert {s.day: s.state for s in _states(tmp_path)}[THU] == "missing"  # not reached
+    s = _fill(tmp_path, fake, MON, FRI)  # no abort: three failures in a row do not stop the run
+    assert s.days_failed == [MON, TUE, WED]
+    assert {x.day: x.state for x in _states(tmp_path)}[THU] == "validated"
+    assert s.days_fetched == [THU, FRI]
 
 
 def test_auth_error_stops_cleanly_and_the_run_resumes(tmp_path):

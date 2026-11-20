@@ -44,7 +44,6 @@ log = logging.getLogger("straddloop")
 SOURCE = "dhan"
 INDEX_MIN_SHARE = 0.99    # index bars needed for a "complete" session
 ATM_MIN_SHARE = 0.95      # bars needed on each ATM series
-MAX_CONSECUTIVE_FAILURES = 3
 
 
 class RunAborted(RuntimeError):
@@ -58,6 +57,7 @@ class PullSummary:
     holidays: list[date] = field(default_factory=list)
     days_partial: list[date] = field(default_factory=list)
     days_failed: list[date] = field(default_factory=list)
+    failed_reasons: list[tuple[date, str]] = field(default_factory=list)  # why each failed day failed
     option_rows: int = 0
     dropped: Counter = field(default_factory=Counter)
 
@@ -200,7 +200,6 @@ def pull_options(
         ledger.recover_interrupted()
         states = availability(ledger, "option_candles", key, start, end, window)
         todo = set(needs_fetch(states, retry_partial=retry_partial, refetch=refetch))
-        failures = 0
         for n, st in enumerate(states, 1):
             day = st.day
             if day not in todo:
@@ -215,16 +214,13 @@ def pull_options(
                 ledger.con.commit()
                 raise
             except ProviderError as exc:
-                failures += 1
+                # Skip this day and carry on. It is recorded as failed, and the next run fetches it again.
                 ledger.set_day("option_candles", key, day, "failed", source=SOURCE, window=window,
                                detail={"reasons": [str(exc)[:300]]})
                 summary.days_failed.append(day)
-                log.error("%s: failed: %s", day, exc)
-                if failures >= MAX_CONSECUTIVE_FAILURES:
-                    raise RunAborted(f"{failures} days failed in a row (last: {exc}); stopping. "
-                                     "Nothing stored was changed; fix the cause and re-run.") from exc
+                summary.failed_reasons.append((day, str(exc)[:300]))
+                log.error("%s: failed, skipped; the next run retries it (%s)", day, exc)
                 continue
-            failures = 0
             res = validate_candles(candles)
             series_bars: Counter = Counter((c.option_type, c.moneyness) for c in res.kept)
             irow = ledger.get_day("underlying_candles", ikey, day)
@@ -282,3 +278,14 @@ def ensure_range(provider: DhanProvider, store_dir: Path, underlying: str, start
                             interval, refetch, ledger, retry_partial)
     finally:
         ledger.close()
+
+
+def failed_days_report(summary: PullSummary) -> str:
+    """Plain-text list of the days that failed, and how to fetch them again. Empty when nothing failed."""
+    if not summary.days_failed:
+        return ""
+    reasons = dict(summary.failed_reasons)
+    lines = [f"{len(summary.days_failed)} day(s) failed and were not saved:"]
+    lines += [f"  {d.isoformat()}: {reasons.get(d, 'unknown')}" for d in summary.days_failed]
+    lines.append("Run the same command again: days already saved are skipped and these are fetched again.")
+    return "\n".join(lines) + "\n"
