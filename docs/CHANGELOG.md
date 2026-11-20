@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased: Dhan rate limits and failed days
+
+* A rate limit (HTTP 429 or DH-904) now waits in minutes: 1, 2, 4, 8, then 10 minutes between the six tries
+  (a longer `Retry-After` from Dhan is honoured, up to 15 minutes). Server errors keep the short backoff.
+* A day that fails is skipped and recorded with its reason; the run no longer stops after three failures in a row.
+* At the end of `load` and `dhan-sample`, the days that failed are listed. Run the same command again to fetch
+  them; days already stored are skipped. `load` exits non-zero while any day is still failed.
+
 ## Unreleased: historical data pipeline
 
 * Ingestion ledger (SQLite beside the Parquet store): per-day state, append-only ingest log, bhavcopy file log.

@@ -40,7 +40,7 @@ def cmd_dhan_sample(args, settings) -> int:
     """Resumable pull (index + options, one day per option call), then the quality and coverage reports."""
     from straddloop.data.coverage import write_report
     from straddloop.data.providers.dhan import DhanProvider
-    from straddloop.data.pull import pull_options, pull_underlying
+    from straddloop.data.pull import failed_days_report, pull_options, pull_underlying
 
     provider = DhanProvider(
         settings.dhan_client_id, settings.dhan_access_token, settings.raw_dir, settings.dhan_requests_per_second
@@ -55,6 +55,8 @@ def cmd_dhan_sample(args, settings) -> int:
                      args.expiry_code, args.interval, refetch=args.refetch)
     log.info("Options: %d days fetched, %d already done, %d with no data; %d rows; dropped %s",
              len(s.days_fetched), len(s.days_skipped), len(s.holidays), s.option_rows, dict(s.dropped))
+    if s.days_failed:
+        print(failed_days_report(s), end="")
     write_report(settings.store_dir, settings.reports_dir)
     return cmd_dhan_quality(args, settings)
 

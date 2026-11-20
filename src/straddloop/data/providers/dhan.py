@@ -131,9 +131,15 @@ class DhanProvider:
 
     AUTH_CODES = {"DH-901", "DH-902", "DH-903"}
     RETRY_CODES = {"DH-904", "DH-908", "DH-909"}
+    # A rate limit (HTTP 429 or DH-904) clears over minutes: wait 1, 2, 4, 8, then 10 minutes between tries.
+    RATE_LIMIT_WAITS_S = (60.0, 120.0, 240.0, 480.0, 600.0)
 
-    def _backoff(self, attempt: int, retry_after: str | None = None) -> float:
-        if retry_after and retry_after.replace(".", "", 1).isdigit():
+    def _backoff(self, attempt: int, retry_after: str | None = None, rate_limited: bool = False) -> float:
+        has_hint = bool(retry_after and retry_after.replace(".", "", 1).isdigit())
+        if rate_limited:
+            wait = self.RATE_LIMIT_WAITS_S[min(attempt, len(self.RATE_LIMIT_WAITS_S) - 1)]
+            return max(wait, min(900.0, float(retry_after))) if has_hint else wait  # honour a longer Retry-After
+        if has_hint:
             return min(120.0, float(retry_after))
         return min(60.0, 2.0 ** (attempt + 1)) * (0.5 + random.random() / 2)  # jitter: 50-100% of the step
 
@@ -158,7 +164,10 @@ class DhanProvider:
                     "changed; the run resumes where it stopped.")
             if resp.status_code == 429 or resp.status_code >= 500 or code in self.RETRY_CODES:
                 last = f"HTTP {resp.status_code} {code or ''}".strip()
-                delay = self._backoff(attempt, resp.headers.get("retry-after"))
+                if attempt == self.max_attempts - 1:
+                    break  # out of tries: report it now instead of waiting first
+                rate_limited = resp.status_code == 429 or code == "DH-904"
+                delay = self._backoff(attempt, resp.headers.get("retry-after"), rate_limited)
                 log.warning("Dhan %s: %s; retry %d/%d in %.1fs", endpoint, last, attempt + 1, self.max_attempts, delay)
                 self._sleep(delay)
                 continue

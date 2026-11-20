@@ -137,7 +137,7 @@ def cmd_load(args, settings) -> int:
     """One command: pull the days from Dhan (resumable), then upload them for the website."""
     from straddloop.data.providers.base import AuthError
     from straddloop.data.providers.dhan import DhanProvider
-    from straddloop.data.pull import RunAborted, ensure_range
+    from straddloop.data.pull import RunAborted, ensure_range, failed_days_report
 
     if not settings.has_dhan_credentials:
         log.error("DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN must be set in .env")
@@ -154,8 +154,11 @@ def cmd_load(args, settings) -> int:
         return 1
     log.info("Pulled: %d new days (%d partial), %d already stored, %d no-session days, %d failed",
              len(s.days_fetched), len(s.days_partial), len(s.days_skipped), len(s.holidays), len(s.days_failed))
+    if s.days_failed:
+        print(failed_days_report(s), end="")
     log.info("Step 2 of 2: uploading to Supabase")
-    return cmd_supabase_upload(args, settings)
+    rc = cmd_supabase_upload(args, settings)
+    return rc or (1 if s.days_failed else 0)
 
 
 def register(sub) -> dict:
