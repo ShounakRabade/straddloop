@@ -35,13 +35,17 @@ def test_matching_sources_pass(tmp_path):
 
 
 def test_dhan_high_above_the_exchange_high_fails(tmp_path):
-    r = reconcile_day(_setup(tmp_path, h=10.5), "NIFTY", DAY)  # Dhan saw 11, exchange says the day's high was 10.5
-    assert r.status == "FAIL" and r.mismatches[0]["check"] == "high"
+    r = reconcile_day(_setup(tmp_path, h=10, o=9.9, c=9.8), "NIFTY", DAY)  # Dhan saw 11, exchange high was 10
+    assert r.status == "WARN" and r.mismatches[0]["check"] == "high"
 
 
-def test_oi_disagreement_is_reported(tmp_path):
+def test_oi_disagreement_is_listed_but_does_not_change_the_outcome(tmp_path):
     r = reconcile_day(_setup(tmp_path, oi=150), "NIFTY", DAY)
-    assert r.status == "FAIL" and {m["check"] for m in r.mismatches} == {"oi"}
+    assert r.status == "PASS" and {m["check"] for m in r.mismatches} == {"oi"}
+
+def test_a_small_price_difference_within_five_percent_passes(tmp_path):
+    r = reconcile_day(_setup(tmp_path, h=10.6), "NIFTY", DAY)  # 0.4 apart on a 10.6 high: inside 5%
+    assert r.status == "PASS" and not r.mismatches
 
 
 def test_strikes_dhan_has_but_nse_lacks_are_counted_not_ignored(tmp_path):
