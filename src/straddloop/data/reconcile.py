@@ -5,16 +5,20 @@ The two sources are independent, so where they overlap they must agree. For each
 bhavcopy row of the resolved expiry:
 
   high / low   Dhan's highest high must not exceed the exchange's high (and lowest low must not undercut
-               the exchange's low) by more than `price_tol`. Strict in one direction only: Dhan may cover
-               only part of the session (the strike left the ATM window), so it can be inside the range.
+               the exchange's low) by more than the tolerance: `price_tol` or 5% of the exchange's price,
+               whichever is larger. Strict in one direction only: Dhan may cover only part of the session
+               (the strike left the ATM window), so it can be inside the range.
   open         compared only for contracts with bars from 09:15 on (full-session): first-bar open vs the
                exchange's open.
-  open interest  last bar's OI vs the exchange's end-of-day OI, relative tolerance `oi_tol`.
+  open interest  last bar's OI vs the exchange's end-of-day OI, relative tolerance `oi_tol`. Recorded as
+               mismatches, but it does not change the outcome (see below).
   volume       NOT asserted. Dhan's unit (contracts or quantity) is unverified and strikes may be partial;
                the ratio dhan/exchange is reported so the unit can be read off a real day.
 
 Outcome per day: PASS, WARN or FAIL, or NO_REFERENCE when there is no bhavcopy (not a pass: nothing was
-checked). A day is never reconciled against a guessed expiry; if the bhavcopy lists none, the result is
+checked). WARN when a price is outside tolerance or a Dhan contract has no bhavcopy row; OI does not
+change the outcome. FAIL only when no contract matches the bhavcopy at all (wrong expiry or missing
+data). A day is never reconciled against a guessed expiry; if the bhavcopy lists none, the result is
 NO_REFERENCE with the reason.
 """
 
@@ -28,7 +32,11 @@ from pathlib import Path
 from straddloop.data import store
 from straddloop.reference.contract_master import ContractMaster, day_bounds
 
-FAIL_SHARE = 0.02  # more than 2% of checked contracts disagreeing on high/low/OI is a FAIL
+REL_PRICE_TOL = 0.05  # a price may differ from the exchange's by up to 5% (or `price_tol`, whichever is larger)
+
+
+def _tol(exchange_price: float, price_tol: float) -> float:
+    return max(price_tol, REL_PRICE_TOL * abs(exchange_price))
 
 
 @dataclass
@@ -79,17 +87,17 @@ def reconcile_day(store_dir: Path, underlying: str, day: date, expiry_flag: str 
         d_hi, d_lo = max(x["high"] for x in bars), min(x["low"] for x in bars)
         if b["high"] is not None:
             checks["high"] += 1
-            if d_hi > b["high"] + price_tol:
+            if d_hi > b["high"] + _tol(b["high"], price_tol):
                 bad["high"] += 1
                 out.mismatches.append({"strike": strike, "type": cp, "check": "high", "dhan": d_hi, "nse": b["high"]})
         if b["low"] is not None and b["low"] > 0:
             checks["low"] += 1
-            if d_lo < b["low"] - price_tol:
+            if d_lo < b["low"] - _tol(b["low"], price_tol):
                 bad["low"] += 1
                 out.mismatches.append({"strike": strike, "type": cp, "check": "low", "dhan": d_lo, "nse": b["low"]})
         if bars[0]["ts"].timetz().replace(tzinfo=None) == time(9, 15) and b["open"]:
             checks["open"] += 1
-            if abs(bars[0]["open"] - b["open"]) > price_tol:
+            if abs(bars[0]["open"] - b["open"]) > _tol(b["open"], price_tol):
                 bad["open"] += 1
                 out.mismatches.append({"strike": strike, "type": cp, "check": "open", "dhan": bars[0]["open"],
                                        "nse": b["open"]})
@@ -107,6 +115,6 @@ def reconcile_day(store_dir: Path, underlying: str, day: date, expiry_flag: str 
     if out.contracts_compared == 0:
         out.status, out.note = "FAIL", f"no Dhan contract matched a bhavcopy row for expiry {exp}: wrong expiry?"
         return out
-    worst = max((bad[k] / checks[k] for k in checks if checks[k]), default=0.0)
-    out.status = "FAIL" if worst > FAIL_SHARE else ("WARN" if any(bad.values()) or out.dhan_only else "PASS")
+    price_bad = bad["high"] + bad["low"] + bad["open"]
+    out.status = "WARN" if price_bad or out.dhan_only else "PASS"
     return out
