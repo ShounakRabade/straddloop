@@ -122,8 +122,9 @@
   // Engine settings the research lab may search that have no Lab field of their own. Only these keys pass
   // through, and only when present in the parameters, so ordinary Lab runs are unchanged.
   const ENGINE_EXTRAS = {
-    straddle: ['exit_time', 'reentry_cutoff', 'max_loss_per_lot', 'skip_expiry_day', 'max_or_width_pct', 'min_or_width_pct', 'or_minutes', 'min_iv_proxy'],
-    orb: ['latest_entry', 'exit_time', 'max_hold_minutes', 'confirm_window', 'breakout_buffer'],
+    straddle: ['entry_time', 'exit_time', 'reentry_cutoff', 'max_loss_per_lot', 'skip_expiry_day', 'max_or_width_pct', 'min_or_width_pct', 'or_minutes', 'min_iv_proxy', 'min_vix', 'max_vix'],
+    orb: ['latest_entry', 'exit_time', 'max_hold_minutes', 'confirm_window', 'breakout_buffer', 'min_vix', 'max_vix'],
+    ema_pullback: ['entry_time', 'exit_time', 'stop_points', 'stop_kind', 'max_structural_stop', 'exit_method', 'confirmation', 'max_hold_minutes', 'max_trades', 'strike_offset', 'min_vix', 'max_vix', 'liquidity_sweep', 'golden_enabled', 'silver_enabled'],
   };
   function extras(strategy, p) {
     const o = {};
@@ -166,6 +167,7 @@
         ['Days with no entry', `${m.sessions_total - m.sessions_traded} of ${m.sessions_total}`],
         ['Average winning day', m.avg_win], ['Average losing day', m.avg_loss],
         ['Costs per traded day', m.sessions_traded ? m.costs / m.sessions_traded : 0],
+        ...vixSummary(sess),
       ],
     });
   }
@@ -188,7 +190,34 @@
         ['Average hold', `${Math.round(m.avg_hold_min || 0)} min`],
         ['Best open gain, average', m.avg_mfe], ['Worst open loss, average', m.avg_mae],
         ['Breakout candles seen', `${m.breakouts}`],
+        ...vixSummary(sess),
       ],
+    });
+  }
+
+  function vixSummary(sess) {
+    const rows = (sess || []).map(s => s.vix && s.vix.c ? s.vix.c.filter(Number.isFinite) : []).filter(a => a.length);
+    const n = rows.reduce((v, a) => v + a.length, 0);
+    if (!n) return [['India VIX data', 'Unavailable for this date range. Load day files again after fetching India VIX 1-minute history.']];
+    const values = rows.flat(), first = rows.reduce((v, a) => v + a[0], 0) / rows.length;
+    const last = rows.reduce((v, a) => v + a[a.length - 1], 0) / rows.length;
+    return [['India VIX coverage', `${rows.length} of ${sess.length} sessions · ${n.toLocaleString()} one-minute bars`],
+      ['India VIX open → close (session average)', `${first.toFixed(2)} → ${last.toFixed(2)} (${(last - first >= 0 ? '+' : '')}${(last - first).toFixed(2)})`],
+      ['India VIX observed range', `${Math.min(...values).toFixed(2)}–${Math.max(...values).toFixed(2)}`]];
+  }
+
+  function emaPullback(p, sessions) {
+    const cfg = E.EMA.makeConfig(Object.assign({}, common(p), extras('ema_pullback', p)));
+    const sess = sessions || calendar(p), run = E.EMA.run(sess, cfg);
+    last = { strategy: 'ema_pullback', results: run.results, cfg, sessions: sess, params: p };
+    const m = run.metrics;
+    return withLedger('ema_pullback', run.results, run.config_hash, p, sess, {
+      strategy: 'ema_pullback', unit: 'trade', sessions: m.sessions_total, traded: m.trades,
+      net: m.net_pnl || 0, gross: m.gross_pnl || 0, costs: m.costs || 0, avg: m.expectancy || 0,
+      ci: null, t: m.trade_t_stat, winRate: m.trade_win_rate, maxDD: m.max_drawdown,
+      worst: m.largest_loss, best: m.largest_win, profitFactor: m.trade_profit_factor,
+      exits: m.trade_exit_reasons || {}, curve: (m.equity_curve || []).map(e => ({ d: e.date, v: e.cum, p: e.pnl })),
+      extra: [['Average hold', `${Math.round(m.avg_hold_min || 0)} min`], ['Setups rejected / filtered', run.results.reduce((n, r) => n + (r.setups || []).filter(x => x.status === 'rejected' || x.status === 'filtered').length, 0)], ...vixSummary(sess)],
     });
   }
 
@@ -327,7 +356,8 @@
     let results;
     if (p.strategy === 'straddle') results = E.runBacktest(sess, straddleCfg(p)).results;
     else if (p.strategy === 'orb') results = E.ORB.run(sess, orbCfg(p)).results;
-    else throw new Error('Research tools cover the straddle and the opening range breakout only.');
+    else if (p.strategy === 'ema_pullback') results = E.EMA.run(sess, E.EMA.makeConfig(Object.assign({}, common(p), extras('ema_pullback', p)))).results;
+    else throw new Error('Research tools cover the intraday NIFTY strategies only.');
     const led = L.runLedger(results, accountOf(p), { symbol: sess[0] ? sess[0].symbol : 'NIFTY' });
     const mult = Number(p.cost_mult) || 1;
     const daily = mult !== 1 ? stressDaily(led, mult) : led.daily;
@@ -358,5 +388,5 @@
       account: { daily: last.ledger.daily, config: last.ledger.acct }, results: last.results.map(slimResult) };
   }
 
-  return { run: (p, sessions) => ({ straddle, orb, fourleg, legs: legsStrategy })[p.strategy](p, sessions), scenarios, replay, exportCsv, inspect, dayOutcomes, evaluate, lastRun, ENGINE_EXTRAS };
+  return { run: (p, sessions) => ({ straddle, orb, fourleg, ema_pullback: emaPullback, legs: legsStrategy })[p.strategy](p, sessions), scenarios, replay, exportCsv, inspect, dayOutcomes, evaluate, lastRun, ENGINE_EXTRAS };
 });

@@ -20,10 +20,10 @@ export function bars(at) {
   return out;
 }
 /** series: [{ cp, off, strike, px: (t) => price | bar | null }] */
-export function dayDoc({ date, expiry, lot = 75, flag = 'WEEK', index, series }) {
+export function dayDoc({ date, expiry, lot = 75, flag = 'WEEK', index, vix, series }) {
   return {
     v: 1, underlying: 'NIFTY', expiry_flag: flag, date, expiry, expiry_source: 'test', lot_size: lot, lot_source: 'test',
-    t0: T0, n: N, px_scale: PX, index: index ? enc(index) : null, spot: delta(Array(N).fill(null)),
+    t0: T0, n: N, px_scale: PX, index: index ? enc(index) : null, vix: vix ? enc(vix) : null, spot: delta(Array(N).fill(null)),
     series: series.map((s) => {
       const b = bars(s.px);
       const k = b.o.map((v) => (v == null ? null : s.strike));

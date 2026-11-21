@@ -38,6 +38,10 @@ const sample: Field[] = [
   { key: 'seed', label: 'Market seed', help: 'A different seed is a different imaginary market. If the result flips with the seed, it was luck.', kind: 'range', min: 1, max: 20, step: 1 },
   { key: 'iv', label: 'Model implied vol', help: 'Realised vol in the model is 12%. Above that, option sellers are overpaid; below, underpaid.', kind: 'range', min: 9, max: 22, step: 1, unit: '%' },
 ];
+const timeOptions = (from: number, to: number, step = 15) => Array.from({ length: Math.floor((to - from) / step) + 1 }, (_, i) => {
+  const m = from + i * step;
+  return { value: `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`, label: `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}` };
+});
 
 /** Account and margin settings, shared by the two intraday strategies. Margin is ESTIMATED, never actual. */
 export const ACCOUNT_DEFAULTS = { capital: 500000, margin_policy: 'reject', margin_span_pct: 9, margin_exposure_pct: 2, brokerage_per_order: 20 };
@@ -85,8 +89,12 @@ export const STRATEGIES: Strategy[] = [
     ],
     synthetic: 'On 120 synthetic sessions it traded 63 days, won 71% of them and still lost ₹32,885 after costs: the average losing day was about four times the average winner. Re-entry legs lost money at every implied-vol level tested.',
     experiments: ['Original rules on 2+ years of real data, with costs for the period', 'Re-entry on against re-entry off', 'Stop sweep from 20% to 75%: look for a plateau, not a peak', 'Target against no target, plus a daily loss cap', 'Slippage from 0 to 2%: if the result dies at 1%, it is not tradeable'],
-    defaults: { strategy: 'straddle', days: 120, seed: 1, iv: 13, sl_pct: 36, target_per_lot: 1000, reentry_enabled: true, entry_condition: 'full', lots: 1, strike_offset: 0, slip_pct: 0.5, ...ACCOUNT_DEFAULTS },
+    defaults: { strategy: 'straddle', days: 120, seed: 1, iv: 13, sl_pct: 36, target_per_lot: 1000, reentry_enabled: true, entry_condition: 'full', entry_time: '09:50', exit_time: '15:15', min_vix: 0, max_vix: 100, lots: 1, strike_offset: 0, slip_pct: 0.5, ...ACCOUNT_DEFAULTS },
     fields: [
+      { key: 'entry_time', label: 'Entry time', help: 'Enter on the next available 1-minute bar after this completed 5-minute confirmation candle.', kind: 'choice', options: timeOptions(590, 840) },
+      { key: 'exit_time', label: 'Exit time', help: 'Close open legs by this time.', kind: 'choice', options: timeOptions(840, 925) },
+      { key: 'min_vix', label: 'Minimum India VIX', help: 'Filter entry using actual VIX at the entry minute. Missing values only block when a filter is active.', kind: 'range', min: 0, max: 60, step: 1 },
+      { key: 'max_vix', label: 'Maximum India VIX', help: 'Filter entry using actual VIX at the entry minute.', kind: 'range', min: 1, max: 100, step: 1 },
       { key: 'sl_pct', label: 'Stop per leg', help: 'How far above its sell price a leg may rise before it is bought back.', kind: 'range', min: 20, max: 75, step: 1, unit: '%' },
       { key: 'target_per_lot', label: 'Profit target per lot', help: 'Net of costs. Everything closes when this is reached.', kind: 'range', min: 500, max: 3000, step: 100, prefix: '₹' },
       { key: 'reentry_enabled', label: 'Re-entry after a stop', help: 'Sell a replacement leg when one side is stopped.', kind: 'choice', options: [{ value: true, label: 'On' }, { value: false, label: 'Off' }] },
@@ -131,8 +139,12 @@ export const STRATEGIES: Strategy[] = [
     ],
     synthetic: 'On 120 synthetic sessions it traded every day, won 35% of trades and lost ₹14,856. 86% of trades left on the reversal level after about 14 minutes. Of 29 variants tried, none was distinguishable from zero except taking a second trade, which was reliably worse.',
     experiments: ['Wick breakout against close and strong-body breakouts', 'Reversal definition and buffer of 0, 5 and 10 points', 'Premium target against index target against no target', 'ATM against one strike in the money', 'Regimes by gap and opening-range width, then walk-forward'],
-    defaults: { strategy: 'orb', days: 120, seed: 1, iv: 13, target_points: 30, stop_buffer: 0, breakout_def: 'wick', target_basis: 'premium', lots: 1, strike_offset: 0, slip_pct: 0.5, ...ACCOUNT_DEFAULTS },
+    defaults: { strategy: 'orb', days: 120, seed: 1, iv: 13, target_points: 30, stop_buffer: 0, breakout_def: 'wick', target_basis: 'premium', latest_entry: '14:30', exit_time: '15:15', min_vix: 0, max_vix: 100, lots: 1, strike_offset: 0, slip_pct: 0.5, ...ACCOUNT_DEFAULTS },
     fields: [
+      { key: 'latest_entry', label: 'Last entry time', help: 'Do not open a new trade after this time.', kind: 'choice', options: timeOptions(600, 900) },
+      { key: 'exit_time', label: 'Exit time', help: 'Close open options by this time.', kind: 'choice', options: timeOptions(840, 925) },
+      { key: 'min_vix', label: 'Minimum India VIX', help: 'Filter entry using actual VIX at the entry minute. Missing values only block when a filter is active.', kind: 'range', min: 0, max: 60, step: 1 },
+      { key: 'max_vix', label: 'Maximum India VIX', help: 'Filter entry using actual VIX at the entry minute.', kind: 'range', min: 1, max: 100, step: 1 },
       { key: 'target_points', label: 'Target', help: 'Premium points above the entry price.', kind: 'range', min: 10, max: 80, step: 5, unit: ' pts' },
       { key: 'stop_buffer', label: 'Stop buffer', help: 'Index points of room beyond the reversal candle before exiting.', kind: 'range', min: 0, max: 30, step: 1, unit: ' pts' },
       { key: 'breakout_def', label: 'A breakout is', help: 'What the breakout candle has to do to count.', kind: 'choice',
@@ -145,8 +157,49 @@ export const STRATEGIES: Strategy[] = [
     ],
   },
   {
-    slug: 'fourleg',
+    slug: 'ema_pullback',
     number: '03',
+    name: 'NIFTY EMA 10/20 pullback scalping',
+    short: 'EMA pullback scalping',
+    oneLine: 'Trade a confirmed pullback towards the 10/20 EMA zone with historical NIFTY options.',
+    market: 'NIFTY', cadence: 'Intraday, 5-minute signals / 1-minute execution', stance: 'Long options', payoff: 'long-option',
+    steps: [
+      { title: 'Build completed 5-minute candles', body: 'The 1-minute NIFTY index bars are grouped from 09:15. EMA 10 and EMA 20 use completed candles only.' },
+      { title: 'Wait for trend and pullback', body: 'EMA order and slope establish direction. Price must first extend away from the EMA zone, then retrace towards it.' },
+      { title: 'Require confirmation', body: 'Enter only after the confirmation candle closes, at the next available 1-minute NIFTY option open. No crossover-only entries.' },
+      { title: 'Use underlying risk and real option fills', body: 'Stops and targets are NIFTY index points. Option P&L uses the selected historical contract OHLC, lot size, slippage, and dated costs.' },
+      { title: 'Close intraday', body: 'At most one position is open at a time. No entries in Bronze (14:00–15:30); all positions close by the selected exit time.' },
+    ],
+    params: [['Signal', 'EMA 10/20 on completed 5-minute NIFTY candles'], ['Entry window', 'Golden / Silver, configurable'], ['Option', 'Historical NIFTY CE / PE, nearest expiry'], ['Stop', '10 / 15 / 20 index points or pullback structure'], ['Exit comparison', '1R / partial at 1R then 2R / EMA or swing trail'], ['VIX', 'Actual India VIX bars only; missing bars are flagged']],
+    weaknesses: [
+      { title: 'OHLC cannot reveal every fill', body: 'When stop and target are both touched in one 1-minute bar, the engine takes the adverse stop first. Missing option bars are flagged.' },
+      { title: 'Strike availability is limited by stored series', body: 'The engine will skip a signal if the selected historical contract has no executable price; it never substitutes a different premium.' },
+      { title: 'VIX coverage is separate', body: 'VIX is optional for historical coverage. Filters require a real VIX close at entry and skip missing observations.' },
+      { title: 'The signals are a testable interpretation', body: 'Trend expansion, pullback shape, and confirmation are configurable rules, not a guarantee of the original author’s exact discretionary judgment.' },
+    ],
+    synthetic: 'This strategy requires real NIFTY index and option history; synthetic mode is disabled.',
+    experiments: ['Fixed 10, 15 and 20-point underlying stops', 'Structural stop with maximum-risk rejection', 'Engulfing / rejection / morning or evening star confirmation', 'Liquidity sweep required versus optional', 'Fixed 1R, partial at 1R then 2R, and trailing exit'],
+    defaults: { strategy: 'ema_pullback', days: 120, seed: 1, iv: 13, entry_time: '09:50', exit_time: '15:15', stop_points: 15, stop_kind: 'fixed', max_structural_stop: 30, exit_method: 'rr1', confirmation: 'engulf_or_rejection', max_hold_minutes: 120, max_trades: 3, strike_offset: 0, min_vix: 0, max_vix: 100, liquidity_sweep: false, golden_enabled: true, silver_enabled: true, lots: 1, slip_pct: 0.5, ...ACCOUNT_DEFAULTS },
+    fields: [
+      { key: 'entry_time', label: 'First entry time', help: 'Earliest signal candle close. Execution is the next available 1-minute option open.', kind: 'choice', options: timeOptions(585, 780, 5) },
+      { key: 'exit_time', label: 'Force exit time', help: 'All open positions close at or before this time.', kind: 'choice', options: timeOptions(840, 925) },
+      { key: 'stop_points', label: 'Fixed NIFTY stop', help: 'Underlying index points. Ignored when using the structural stop.', kind: 'choice', options: [10, 15, 20].map(value => ({ value, label: `${value} points` })) },
+      { key: 'stop_kind', label: 'Stop type', help: 'Structural stop uses the pullback low/high and rejects risk wider than the maximum.', kind: 'choice', options: [{ value: 'fixed', label: 'Fixed points' }, { value: 'structural', label: 'Pullback structure' }] },
+      { key: 'max_structural_stop', label: 'Maximum structural risk', help: 'Reject a setup if its structural stop is farther away.', kind: 'range', min: 10, max: 60, step: 5, unit: ' index pts' },
+      { key: 'exit_method', label: 'Exit method', help: 'Compare the baseline 1R target, partial profit and trailing exits.', kind: 'choice', options: [{ value: 'rr1', label: 'Fixed 1:1' }, { value: 'partial_2r', label: '50% at 1R, rest at 2R / breakeven stop' }, { value: 'trailing_ema', label: 'Trail EMA 10 after 1R' }] },
+      { key: 'confirmation', label: 'Confirmation candle', help: 'Use a completed trend-direction candle at the EMA zone.', kind: 'choice', options: [{ value: 'engulf_or_rejection', label: 'Engulfing or rejection' }, { value: 'engulfing', label: 'Engulfing (includes morning/evening star)' }, { value: 'rejection', label: 'Rejection wick' }] },
+      { key: 'liquidity_sweep', label: 'Require liquidity sweep', help: 'Require a prior swing to be swept and reclaimed before confirmation.', kind: 'choice', options: [{ value: false, label: 'Off' }, { value: true, label: 'On' }] },
+      { key: 'golden_enabled', label: 'Golden session (09:15–12:00)', help: 'Allow new positions during Golden.', kind: 'choice', options: [{ value: true, label: 'On' }, { value: false, label: 'Off' }] },
+      { key: 'silver_enabled', label: 'Silver session (12:00–14:00)', help: 'Allow new positions during Silver.', kind: 'choice', options: [{ value: true, label: 'On' }, { value: false, label: 'Off' }] },
+      { key: 'min_vix', label: 'Minimum India VIX', help: 'Requires a real India VIX 1-minute observation at entry; missing values skip that signal.', kind: 'range', min: 0, max: 60, step: 1 },
+      { key: 'max_vix', label: 'Maximum India VIX', help: 'Requires a real India VIX 1-minute observation at entry; missing values skip that signal.', kind: 'range', min: 1, max: 100, step: 1 },
+      ...trade('0 buys ATM. Positive buys slightly ITM (CE below spot / PE above spot); negative buys OTM.'),
+      ...account,
+    ],
+  },
+  {
+    slug: 'fourleg',
+    number: '04',
     name: 'Monthly four-leg stock-options structure',
     short: 'Four-leg ratio',
     oneLine: 'Sell a call and a put 5% out, buy more lots ₹50 beyond each. Target 10% of margin.',

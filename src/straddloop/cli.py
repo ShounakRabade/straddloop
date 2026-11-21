@@ -28,7 +28,7 @@ def cmd_dhan_check_ids(args, settings) -> int:
     import httpx
 
     text = httpx.get(SCRIP_MASTER_URL, timeout=60).text
-    wanted = {"NIFTY", "BANKNIFTY", "SENSEX", "NIFTY 50", "NIFTY BANK"}
+    wanted = {"NIFTY", "BANKNIFTY", "SENSEX", "NIFTY 50", "NIFTY BANK", "INDIA VIX"}
     for row in csv.DictReader(io.StringIO(text)):
         values = {v.strip().upper() for v in row.values() if v}
         if "INDEX" in values and values & wanted:

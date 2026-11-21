@@ -60,6 +60,24 @@ def test_date_windows_respect_limits():
     assert all((b - a).days <= 30 for a, b in w)
 
 
+def test_india_vix_uses_verified_index_id_and_parses_one_minute_candles(tmp_path):
+    bodies = []
+
+    def handler(request: httpx.Request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"open": [15.2], "high": [15.4], "low": [15.1],
+                                         "close": [15.3], "volume": [0], "timestamp": [T0]})
+
+    http = httpx.Client(base_url="https://api.dhan.co/v2", transport=httpx.MockTransport(handler))
+    provider = DhanProvider("CLIENT", "TOKEN", tmp_path, requests_per_second=0, http=http)
+    rows = provider.underlying_candles("INDIA_VIX", date(2025, 9, 1), date(2025, 9, 2), 1)
+
+    assert bodies == [{"securityId": "21", "exchangeSegment": "IDX_I", "instrument": "INDEX", "interval": "1",
+                       "oi": False, "fromDate": "2025-09-01 09:15:00", "toDate": "2025-09-02 09:15:00"}]
+    assert len(rows) == 1 and rows[0].underlying == "INDIA_VIX" and rows[0].interval_min == 1
+    assert (rows[0].open, rows[0].high, rows[0].low, rows[0].close) == (15.2, 15.4, 15.1, 15.3)
+
+
 def test_requests_are_one_per_weekday_archived_and_secret_free(tmp_path):
     bodies = []
 

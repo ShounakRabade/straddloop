@@ -64,6 +64,7 @@
     const lot = opts.lotSize > 0 ? opts.lotSize : doc.lot_size;
     return {
       date: doc.date, symbol: doc.underlying, source: 'dhan', bar_minutes: 1, times, und,
+      vix: doc.vix ? ohlc(doc.vix, scale) : null,
       expiries: [{ expiry: doc.expiry, lot_size: lot, contracts, series: doc.expiry_flag || 'WEEK' }],
       meta: { expiry_flag: doc.expiry_flag, expiry_source: doc.expiry_source, lot_source: opts.lotSize > 0 ? 'set in the Lab' : doc.lot_source,
         file_lot_size: doc.lot_size, flags },

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date
+from datetime import date, timedelta
 
 from straddloop.data.dayfiles import StoreReader, build_day
 
@@ -42,7 +42,8 @@ def _days(args, settings):
     master = ContractMaster(settings.store_dir)
     for d in days:
         yield d, build_day(args.underlying, args.expiry, d, reader.options(d, args.underlying, args.expiry),
-                           reader.index(d, args.underlying), master)
+                           reader.index(d, args.underlying), master,
+                           vix_rows=reader.index(d, "INDIA_VIX"))
 
 
 def ledger_status_rows(settings, underlying: str, expiry: str, start: date, end: date) -> list[dict]:
@@ -135,9 +136,10 @@ def cmd_export_days(args, settings) -> int:
 
 def cmd_load(args, settings) -> int:
     """One command: pull the days from Dhan (resumable), then upload them for the website."""
-    from straddloop.data.providers.base import AuthError
+    from straddloop.data.providers.base import AuthError, ProviderError
     from straddloop.data.providers.dhan import DhanProvider
     from straddloop.data.pull import RunAborted, ensure_range, failed_days_report
+    from straddloop.data.pull import pull_underlying
 
     if not settings.has_dhan_credentials:
         log.error("DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN must be set in .env")
@@ -149,6 +151,11 @@ def cmd_load(args, settings) -> int:
              args.underlying, args.expiry, start, end)
     try:
         s = ensure_range(provider, settings.store_dir, args.underlying, start, end, args.window, args.expiry, 1, 1)
+        log.info("Fetching India VIX 1-minute history for the same range")
+        try:
+            pull_underlying(provider, settings.store_dir, "INDIA_VIX", start, end + timedelta(days=1), 1)
+        except ProviderError as exc:
+            log.warning("India VIX history is unavailable for some or all dates; the options backtest can still run: %s", exc)
     except (AuthError, RunAborted) as exc:
         log.error("%s", exc)
         return 1
