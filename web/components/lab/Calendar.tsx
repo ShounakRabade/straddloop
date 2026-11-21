@@ -5,7 +5,7 @@
  * for the visible month, so a cell and the summary below can never disagree.
  */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { FLOOR, addDays, boundsOf, buildDateRange, loadCommand, presetRange, weekdayOf, type DateRange, type DayEntry, type InventoryDay, type Preset, type Series, type StatusRow } from '@/lib/dateRange';
+import { addDays, boundsOf, buildDateRange, loadCommand, presetRange, weekdayOf, type DateRange, type DayEntry, type InventoryDay, type Preset, type Series, type StatusRow } from '@/lib/dateRange';
 import { inr, shortDate } from '@/lib/format';
 import { outcomeLabel } from '@/lib/outcomes';
 import type { DayOutcome } from '@/lib/types';
@@ -34,16 +34,17 @@ export function Calendar({ inventory, statuses, source, series, request, onChang
 }) {
   const bounds = useMemo(() => boundsOf(inventory, statuses), [inventory, statuses]);
   const ceiling = bounds.latest_any;
-  const minMonth = ym(FLOOR), maxMonth = ym(ceiling ?? new Date().toISOString().slice(0, 10));
-  const [view, setView] = useState(() => ym(request.to || ceiling || FLOOR));
+  const floor = bounds.floor;
+  const minMonth = ym(floor), maxMonth = ym(ceiling ?? new Date().toISOString().slice(0, 10));
+  const [view, setView] = useState(() => ym(request.to || ceiling || floor));
   const [pending, setPending] = useState<string | null>(null);
   const [hover, setHover] = useState<string | null>(null);
-  const [focus, setFocus] = useState<string>(request.to || ceiling || FLOOR);
+  const [focus, setFocus] = useState<string>(request.to || ceiling || floor);
   const [editing, setEditing] = useState<'from' | 'to' | null>(null);
   const grid = useRef<HTMLDivElement>(null);
   const opts = { source, underlying: 'NIFTY', series } as const;
 
-  useEffect(() => { if (request.to) setView(ym(request.to < FLOOR ? FLOOR : request.to > (ceiling ?? request.to) ? ceiling ?? request.to : request.to)); }, [request.to, ceiling]);
+  useEffect(() => { if (request.to) setView(ym(request.to < floor ? floor : request.to > (ceiling ?? request.to) ? ceiling ?? request.to : request.to)); }, [request.to, ceiling, floor]);
 
   // States for the visible month, from the same builder as the selected range.
   const month = useMemo(() => {
@@ -56,7 +57,7 @@ export function Calendar({ inventory, statuses, source, series, request, onChang
   // Coverage of every month from the floor to the latest stored day: share of weekdays that can run.
   const strip = useMemo(() => {
     if (!ceiling) return [] as { year: number; months: ({ m: string; frac: number; runnable: number; weekdays: number } | null)[] }[];
-    const all = buildDateRange({ from: FLOOR, to: ceiling }, inventory, statuses, opts);
+    const all = buildDateRange({ from: floor, to: ceiling }, inventory, statuses, opts);
     const per = new Map<string, { runnable: number; weekdays: number }>();
     for (const d of all.days) {
       const k = ym(d.date), v = per.get(k) ?? { runnable: 0, weekdays: 0 };
@@ -65,7 +66,7 @@ export function Calendar({ inventory, statuses, source, series, request, onChang
       per.set(k, v);
     }
     const years: { year: number; months: ({ m: string; frac: number; runnable: number; weekdays: number } | null)[] }[] = [];
-    for (let y = Number(FLOOR.slice(0, 4)); y <= Number(ceiling.slice(0, 4)); y++) {
+    for (let y = Number(floor.slice(0, 4)); y <= Number(ceiling.slice(0, 4)); y++) {
       years.push({ year: y, months: MONTHS.map((_, i) => {
         const m = `${y}-${String(i + 1).padStart(2, '0')}`;
         const v = per.get(m);
@@ -74,10 +75,10 @@ export function Calendar({ inventory, statuses, source, series, request, onChang
     }
     return years;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inventory, statuses, ceiling, source, series]);
+  }, [inventory, statuses, ceiling, floor, source, series]);
 
   const sel = pending ? { from: hover && hover < pending ? hover : pending, to: hover && hover > pending ? hover : pending } : request;
-  const selectable = (d: string) => d >= FLOOR && !!ceiling && d <= ceiling;
+  const selectable = (d: string) => d >= floor && !!ceiling && d <= ceiling;
 
   function pick(d: string) {
     if (!selectable(d)) return;
@@ -91,7 +92,7 @@ export function Calendar({ inventory, statuses, source, series, request, onChang
   }
 
   function move(d: string) {
-    const clamped = d < FLOOR ? FLOOR : ceiling && d > ceiling ? ceiling : d;
+    const clamped = d < floor ? floor : ceiling && d > ceiling ? ceiling : d;
     setFocus(clamped);
     if (ym(clamped) !== view) setView(ym(clamped));
     const cell = () => grid.current?.querySelector<HTMLButtonElement>(`[data-date="${clamped}"]`);
@@ -134,15 +135,15 @@ export function Calendar({ inventory, statuses, source, series, request, onChang
               onClick={() => { if (r) { onChange(r); setPending(null); setEditing(null); } }}>{p.label}</button>
           );
         })}
-        <button type="button" className="qbtn" aria-pressed={!presetNow && !!request.from} onClick={() => { setPending(null); setEditing('from'); move(request.from || ceiling || FLOOR); }} title="Pick both ends on the calendar">Custom</button>
+        <button type="button" className="qbtn" aria-pressed={!presetNow && !!request.from} onClick={() => { setPending(null); setEditing('from'); move(request.from || ceiling || floor); }} title="Pick both ends on the calendar">Custom</button>
       </div>
 
       <div className="cal-sel">
-        <button type="button" aria-pressed={editing === 'from' || (!!pending && !editing)} onClick={() => { setPending(null); setEditing('from'); move(request.from || ceiling || FLOOR); }}>
+        <button type="button" aria-pressed={editing === 'from' || (!!pending && !editing)} onClick={() => { setPending(null); setEditing('from'); move(request.from || ceiling || floor); }}>
           <span className="lbl">From</span><b>{pending && !editing ? shortDate(pending) : request.from ? shortDate(request.from) : 'Pick a day'}</b>
         </button>
         <span className="arrow" aria-hidden="true">→</span>
-        <button type="button" aria-pressed={editing === 'to' || (!!pending && !editing)} onClick={() => { setPending(null); setEditing('to'); move(request.to || ceiling || FLOOR); }}>
+        <button type="button" aria-pressed={editing === 'to' || (!!pending && !editing)} onClick={() => { setPending(null); setEditing('to'); move(request.to || ceiling || floor); }}>
           <span className="lbl">To</span><b>{pending && !editing ? 'pick the end' : request.to ? shortDate(request.to) : 'Pick a day'}</b>
         </button>
       </div>
@@ -194,7 +195,7 @@ export function Calendar({ inventory, statuses, source, series, request, onChang
       </ul>
 
       {strip.length > 0 && (
-        <div className="cal-strip" aria-label="Stored data by month, from January 2023">
+        <div className="cal-strip" aria-label={`Stored data by month, from ${floor}`}>
           <span className="lbl">Coverage by month</span>
           {strip.map((y) => (
             <div key={y.year} className="cal-strip-row">

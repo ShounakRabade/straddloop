@@ -48,7 +48,7 @@ export interface DateRange {
   key: string;
 }
 
-/** Research history starts here (product decision); the cost table itself starts 2020-07-01. */
+/** Fallback only when no dated inventory exists; real ranges use the series' earliest stored day. */
 export const FLOOR = '2023-01-01';
 
 // NSE equity-derivatives trading holidays on weekdays, 2023–2025, from memory of NSE circulars.
@@ -87,18 +87,20 @@ function hash(s: string): string {
 const EMPTY_COUNTS = (): DateRange['counts'] => ({ validated: 0, partial: 0, failed: 0, downloading: 0, missing: 0, holiday: 0, weekend: 0, calendar: 0, weekdays: 0, runnable: 0 });
 
 /** Bounds of what is stored: earliest file, latest validated file, latest file of any usable quality. */
-export function boundsOf(inventory: InventoryDay[], statuses: StatusRow[] = [], floor = FLOOR): DateRange['bounds'] {
+export function boundsOf(inventory: InventoryDay[], statuses: StatusRow[] = [], floor?: string): DateRange['bounds'] {
+  const dated = inventory.filter((d) => d.quality !== 'empty').map((d) => d.trade_date).sort();
+  const effectiveFloor = floor ?? dated[0] ?? FLOOR;
   const st = new Map(statuses.map((s) => [s.trade_date, s.status]));
   let earliest: string | null = null, latestValid: string | null = null, latestAny: string | null = null;
   for (const d of inventory) {
-    if (d.quality === 'empty' || d.trade_date < floor) continue;
+    if (d.quality === 'empty' || d.trade_date < effectiveFloor) continue;
     if (!earliest || d.trade_date < earliest) earliest = d.trade_date;
     if (!latestAny || d.trade_date > latestAny) latestAny = d.trade_date;
     const s = st.get(d.trade_date);
     const valid = s ? s === 'validated' : d.quality === 'complete';
     if (valid && (!latestValid || d.trade_date > latestValid)) latestValid = d.trade_date;
   }
-  return { floor, earliest, latest_validated: latestValid, latest_any: latestAny };
+  return { floor: effectiveFloor, earliest, latest_validated: latestValid, latest_any: latestAny };
 }
 
 export interface BuildOptions {
@@ -115,7 +117,7 @@ export interface BuildOptions {
  * never missing; the request is clamped to [floor, latest stored day] and the clamp is stated.
  */
 export function buildDateRange(request: { from: string; to: string }, inventory: InventoryDay[], statuses: StatusRow[] = [], opts: BuildOptions = {}): DateRange {
-  const floor = opts.floor ?? FLOOR;
+  const floor = opts.floor ?? inventory.filter((d) => d.quality !== 'empty').map((d) => d.trade_date).sort()[0] ?? FLOOR;
   const today = opts.today ?? todayIST();
   const dataset = { source: opts.source ?? 'dhan', underlying: opts.underlying ?? 'NIFTY', series: opts.series ?? 'WEEK', interval: '1m' as const };
   const bounds = boundsOf(inventory, statuses, floor);
@@ -181,7 +183,7 @@ export function buildDateRange(request: { from: string; to: string }, inventory:
 }
 
 /** Dates for a preset. Trading-day presets count stored runnable days backwards from the latest one. */
-export function presetRange(preset: Preset, inventory: InventoryDay[], statuses: StatusRow[] = [], floor = FLOOR): { from: string; to: string } | null {
+export function presetRange(preset: Preset, inventory: InventoryDay[], statuses: StatusRow[] = [], floor?: string): { from: string; to: string } | null {
   const b = boundsOf(inventory, statuses, floor);
   const end = b.latest_any;
   if (!end || !b.earliest) return null;
