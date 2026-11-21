@@ -187,7 +187,7 @@ export function presetRange(preset: Preset, inventory: InventoryDay[], statuses:
   const b = boundsOf(inventory, statuses, floor);
   const end = b.latest_any;
   if (!end || !b.earliest) return null;
-  const usable = inventory.filter((d) => d.quality !== 'empty' && d.trade_date >= floor && d.trade_date <= end).map((d) => d.trade_date).sort();
+  const usable = inventory.filter((d) => d.quality !== 'empty' && d.trade_date >= b.floor && d.trade_date <= end).map((d) => d.trade_date).sort();
   const back = (n: number) => usable[Math.max(0, usable.length - n)];
   const months = (m: number) => {
     const d = new Date(`${end}T00:00:00Z`);
