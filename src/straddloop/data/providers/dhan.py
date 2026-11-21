@@ -63,6 +63,9 @@ UNDERLYINGS: dict[str, DhanUnderlying] = {
     "BANKNIFTY": DhanUnderlying("25", "IDX_I", "NSE_FNO", "OPTIDX", "MONTH"),
     "SENSEX": DhanUnderlying("51", "IDX_I", "BSE_FNO", "OPTIDX", "WEEK"),
 }
+# India VIX is an index instrument, not an option underlying. Verified from Dhan's scrip master by
+# `straddloop dhan-check-ids` on 21 Nov 2026; keep it out of UNDERLYINGS so option requests cannot use it.
+INDIA_VIX_SECURITY_ID = "21"
 
 CAPABILITIES = ProviderCapabilities(
     name=SOURCE,
@@ -217,12 +220,16 @@ class DhanProvider:
     def underlying_candles(
         self, underlying: str, start: date, end: date, interval_min: int = 1
     ) -> list[UnderlyingCandle]:
-        spec = _spec(underlying)
+        if underlying == "INDIA_VIX":
+            security_id, segment = INDIA_VIX_SECURITY_ID, "IDX_I"
+        else:
+            spec = _spec(underlying)
+            security_id, segment = spec.security_id, spec.index_segment
         out: list[UnderlyingCandle] = []
         for w_start, w_end in date_windows(start, end, 90):
             body = {
-                "securityId": spec.security_id,
-                "exchangeSegment": spec.index_segment,
+                "securityId": security_id,
+                "exchangeSegment": segment,
                 "instrument": "INDEX",
                 "interval": str(interval_min),
                 "oi": False,

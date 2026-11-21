@@ -226,7 +226,8 @@ class DayFile:
 
 
 def build_day(underlying: str, expiry_flag: str, day: date, option_rows: list[dict],
-              index_rows: list[dict], master=None, expiry_code: int = 1) -> DayFile | None:
+              index_rows: list[dict], master=None, expiry_code: int = 1,
+              vix_rows: list[dict] | None = None) -> DayFile | None:
     """`master` (a ContractMaster) replaces the assumed expiry and lot size with the exchange's own values
     for that day when its bhavcopy is stored; without it, each is labelled `assumed` in the file."""
     series: dict[tuple[str, int], dict[str, list]] = {}
@@ -268,6 +269,18 @@ def build_day(underlying: str, expiry_flag: str, day: date, option_rows: list[di
         idx = {"o": delta(idx["o"]), "h": _rel(idx["h"], idx["o"], 1), "l": _rel(idx["o"], idx["l"], 1),
                "c": _rel(idx["c"], idx["o"], 1)}
 
+    vix = None
+    if vix_rows:
+        raw_vix = {f: [None] * N for f in "ohlc"}
+        for r in vix_rows:
+            i = _minute(r.get("ts"))
+            if i is None:
+                continue
+            for f in ("open", "high", "low", "close"):
+                raw_vix[f[0]][i] = _int(r.get(f), PX)
+        vix = {"o": delta(raw_vix["o"]), "h": _rel(raw_vix["h"], raw_vix["o"], 1),
+               "l": _rel(raw_vix["o"], raw_vix["l"], 1), "c": _rel(raw_vix["c"], raw_vix["o"], 1)}
+
     expiry = assumed_expiry(day, expiry_flag)
     lot = assumed_lot_size(underlying, expiry)
     expiry_source = ("assumed: nearest " + ("weekly" if expiry_flag == "WEEK" else "monthly")
@@ -297,7 +310,7 @@ def build_day(underlying: str, expiry_flag: str, day: date, option_rows: list[di
         "expiry_source": expiry_source,
         "lot_size": lot, "lot_source": lot_source,
         "t0": T0, "n": N, "px_scale": PX, "source": "dhan rolling options, 1-minute candles (no bid/ask)",
-        "index": idx, "spot": delta(spot), "series": out_series,
+        "index": idx, "vix": vix, "spot": delta(spot), "series": out_series,
     }
     raw = json.dumps(doc, separators=(",", ":")).encode()
     blob = gzip.compress(raw, compresslevel=9, mtime=0)
@@ -312,7 +325,9 @@ def decode(doc: dict) -> dict:
         return {"o": o, "h": [None if x is None or y is None else x + y for x, y in zip(o, b["h"], strict=True)],
                 "l": [None if x is None or y is None else x - y for x, y in zip(o, b["l"], strict=True)],
                 "c": [None if x is None or y is None else x + y for x, y in zip(o, b["c"], strict=True)]}
-    out = {"index": ohlc(doc["index"]) if doc["index"] else None, "spot": undelta(doc["spot"]), "series": []}
+    out = {"index": ohlc(doc["index"]) if doc["index"] else None,
+           "vix": ohlc(doc["vix"]) if doc.get("vix") else None,
+           "spot": undelta(doc["spot"]), "series": []}
     for s in doc["series"]:
         d = ohlc(s)
         d.update(cp=s["cp"], off=s["off"], k=undelta(s["k"]), v=undelta(s["v"]), oi=undelta(s["oi"]),

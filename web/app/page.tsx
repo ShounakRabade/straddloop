@@ -61,12 +61,12 @@ export default function Home() {
         <div className="wrap">
           <Reveal className="section-head">
             <p className="label">The rule sets</p>
-            <h2>Three strategies. Each one written down until nothing is left to guess.</h2>
+            <h2>Four strategies. Each one written down until nothing is left to guess.</h2>
             <p className="lede">Won 71% of days and still lost money: that is the short straddle on synthetic data. The figures below are the default rules, after costs.</p>
           </Reveal>
           <div className="cards-3">
             {STRATEGIES.map((s, i) => {
-              const r = runs[s.slug];
+              const r = s.slug === 'ema_pullback' ? null : runs[s.slug];
               return (
                 <Reveal key={s.slug} delay={i * 90}>
                   <Link href={`/strategies/${s.slug}`} className="strat-card sheet" {...hard}>
@@ -78,7 +78,7 @@ export default function Home() {
                     </div>
                     <div className="strat-card-chart"><PayoffChart shape={s.payoff} compactView id={`card-${s.slug}`} /></div>
                     <div className="strat-card-foot">
-                      <div><p className="label">Synthetic net</p><p className={`fig ${tone(r.net)}`}>{figure(r.net)}</p></div>
+                      <div><p className="label">{r ? 'Synthetic net' : 'Data required'}</p><p className={`fig ${r ? tone(r.net) : ''}`}>{r ? figure(r.net) : 'Real NIFTY history'}</p></div>
                       <span className="go">Rules <span className="arrow" aria-hidden="true">→</span></span>
                     </div>
                   </Link>

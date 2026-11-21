@@ -23,9 +23,9 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
 export default async function StrategyPage({ params }: Props) {
   const s = bySlug((await params).slug);
   if (!s) notFound();
-  const r = runs[s.slug];
+  const r = runs[s.slug] ?? null;
   const idx = STRATEGIES.indexOf(s), others = STRATEGIES.filter((_, i) => i !== idx);
-  const unit = r.unit === 'day' ? 'traded day' : r.unit;
+  const unit = r ? (r.unit === 'day' ? 'traded day' : r.unit) : 'trade';
   return (
     <Shell>
       <header className="page-head">
@@ -60,8 +60,8 @@ export default async function StrategyPage({ params }: Props) {
             {s.weaknesses.map((w) => <div key={w.title}><h3>{w.title}</h3><p className="muted" style={{ fontSize: '0.9688rem' }}>{w.body}</p></div>)}
           </div>
 
-          <h2>What the synthetic run showed</h2>
-          <div className="stack" style={{ '--gap': '20px' } as React.CSSProperties}>
+          <h2>{r ? 'What the synthetic run showed' : 'Backtest this strategy'}</h2>
+          {!r ? <div className="stack"><p className="prose">{s.synthetic} This strategy requires stored real NIFTY index and option candles, so the site does not show synthetic performance figures.</p><ButtonLink href={`/lab?s=${s.slug}&data=real`} variant="primary" size="lg" arrow>Choose a real NIFTY date range</ButtonLink></div> : <div className="stack" style={{ '--gap': '20px' } as React.CSSProperties}>
             <p className="prose">{s.synthetic}</p>
             <div className="kpis">
               <div className="kpi kpi--lead"><span className="label">Net after costs</span><span className={`v ${tone(r.net)}`}>{figure(r.net)}</span></div>
@@ -73,7 +73,7 @@ export default async function StrategyPage({ params }: Props) {
               <EquityChart id={`s-${s.slug}`} points={r.curve} draw={false} label={`Synthetic cumulative net profit and loss for ${s.name}, ending at ${inr(r.net)}.`} />
             </div>
             <SyntheticNote />
-          </div>
+          </div>}
 
           <h2>Test first on real data</h2>
           <ul className="checklist">{s.experiments.map((e) => <li key={e}>{e}</li>)}</ul>
@@ -82,7 +82,7 @@ export default async function StrategyPage({ params }: Props) {
           <p className="prose muted" style={{ marginBottom: 24 }}>The lab runs the same engine in your browser. Move one setting and see what it does to the result.</p>
           <ButtonLink href={`/lab?s=${s.slug}`} variant="primary" size="lg" arrow>Open {s.short.toLowerCase()} in the lab</ButtonLink>
 
-          <h2>The other two</h2>
+          <h2>Other strategies</h2>
           <div className="next-prev">
             {others.map((o) => (
               <Link key={o.slug} href={`/strategies/${o.slug}`} className="sheet sheet-pad strat-card" style={{ gap: 6 }} {...hard}>

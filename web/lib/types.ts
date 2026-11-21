@@ -1,6 +1,6 @@
 import type { Gate, PositionRecord, StrategySpec } from './legs/types';
 
-export type StrategySlug = 'straddle' | 'orb' | 'fourleg';
+export type StrategySlug = 'straddle' | 'orb' | 'fourleg' | 'ema_pullback';
 export type Focus = 'index' | 'stocks' | 'exploring';
 export type Params = Record<string, string | number | boolean>;
 
@@ -57,7 +57,7 @@ export interface DayOutcome {
 
 export interface ReplayLeg { side: string; strike: number; kind: string; entry_t: number; entry_px: number; exit_t: number | null; exit_px: number | null; exit_reason: string | null; stop: number | null; net: number }
 export interface Replay {
-  strategy: 'straddle' | 'orb' | 'legs'; date: string; status: string; reason: string | null; net?: number; gross?: number; costs?: number;
+  strategy: 'straddle' | 'orb' | 'ema_pullback' | 'legs'; date: string; status: string; reason: string | null; net?: number; gross?: number; costs?: number;
   exit_reason?: string; expiry?: string; lot_size?: number; qty?: number; flags: string[];
   or_high: number | null; or_low: number | null; decision_t?: number | null;
   candles: { t: number; o: number; h: number; l: number; c: number }[];

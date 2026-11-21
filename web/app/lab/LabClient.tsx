@@ -53,7 +53,7 @@ export function LabClient() {
   const [slug, setSlug] = useState<StrategySlug>('straddle');
   const [params, setParams] = useState<Params>(STRATEGIES[0].defaults);
   const [booted, setBooted] = useState(false);
-  const [source, setSource] = useState<Source>('synthetic');
+  const [source, setSource] = useState<Source>(slug === 'ema_pullback' ? 'real' : 'synthetic');
   const [flag, setFlag] = useState<ExpiryFlag>('WEEK');
   const [avail, setAvail] = useState<Availability | null>(null);
   const [dayStatus, setDayStatus] = useState<StatusRow[]>(NO_STATUS);
@@ -101,7 +101,7 @@ export function LabClient() {
         sessionStorage.removeItem(OPEN_KEY);
         const p = JSON.parse(raw) as Params, s = bySlug(String(p.strategy));
         if (s) {
-          setSlug(s.slug); setParams({ ...s.defaults, ...p });
+          setSlug(s.slug); setParams({ ...s.defaults, ...p }); if (s.slug === 'ema_pullback') setSource('real');
           if (p.data_from) { setSource('real'); setRequest({ from: String(p.data_from), to: String(p.data_to ?? '') }); if (p.data_flag === 'MONTH') setFlag('MONTH'); }
           setBooted(true); return;
         }
@@ -109,8 +109,8 @@ export function LabClient() {
     } catch { /* fall through to the default */ }
     const q = new URLSearchParams(window.location.search);
     const s = bySlug(q.get('s') ?? '');
-    if (s) { setSlug(s.slug); setParams(s.defaults); }
-    try { if (q.get('data') === 'real' || localStorage.getItem(SOURCE_KEY) === 'real') setSource('real'); } catch { /* storage blocked */ }
+    if (s) { setSlug(s.slug); setParams(s.defaults); if (s.slug === 'ema_pullback') setSource('real'); }
+    try { if (q.get('data') === 'real' || localStorage.getItem(SOURCE_KEY) === 'real' || s?.slug === 'ema_pullback') setSource('real'); } catch { /* storage blocked */ }
     setBooted(true);
   }, []);
 
@@ -252,7 +252,7 @@ export function LabClient() {
     setRail((x) => { const n = x === 'open' ? 'collapsed' : 'open'; try { localStorage.setItem(RAIL_KEY, n); } catch { /* ignore */ } return n; });
   };
   const setAuto = (v: boolean) => setAutoPref((p) => { const n = { ...p, [real ? 'real' : 'synthetic']: v }; try { localStorage.setItem(AUTO_KEY, JSON.stringify(n)); } catch { /* ignore */ } return n; });
-  const pick = (next: StrategySlug) => { setSlug(next); setParams(bySlug(next)!.defaults); setNote(''); setSaveOpen(false); setBeforeLoad(null); };
+  const pick = (next: StrategySlug) => { setSlug(next); setParams(bySlug(next)!.defaults); if (next === 'ema_pullback') pickSource('real'); setNote(''); setSaveOpen(false); setBeforeLoad(null); };
   const resetAll = () => { setParams(strategy.defaults); setBeforeLoad(null); };
   /** Only ever called by the person pressing "Load" in the optimisation lab. */
   const loadFromStudy = (changes: Record<string, unknown>) => { setBeforeLoad(params); setParams((p) => ({ ...p, ...(changes as Params) })); };
@@ -415,7 +415,7 @@ export function LabClient() {
             <fieldset className="f" style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
               <div className="f-top"><legend className="f-label" style={{ padding: 0, float: 'left' }}>Source</legend><Tip label="Source" text="The synthetic model is a labelled imaginary market with dates in 2099. Real data is stored Dhan 1-minute NIFTY option and index candles." /></div>
               <div className="seg2">
-                <label><input type="radio" name="source" checked={!real} onChange={() => pickSource('synthetic')} /><span>Synthetic model</span></label>
+                <label><input type="radio" name="source" checked={!real} disabled={slug === 'ema_pullback'} onChange={() => pickSource('synthetic')} /><span>Synthetic model</span></label>
                 <label><input type="radio" name="source" checked={real} disabled={!realOk} onChange={() => pickSource('real')} /><span>Real NIFTY (Dhan)</span></label>
               </div>
               {!realOk && <div className="f-meta">Real data covers NIFTY index options only, so the four-leg stock strategy stays synthetic.</div>}
@@ -536,7 +536,7 @@ export function LabClient() {
             <div className="ws-notice" data-kind="real" role="note">
               <span className="stamp2">Real data</span>
               <span>NIFTY 1-minute option candles from Dhan{r?.data ? `, ${shortDate(r.data.from)} to ${shortDate(r.data.to)} (${r.data.days} sessions)` : ''}. <b>Fills are candle prices plus {slip}% slippage, so they are optimistic.</b></span>
-              <button type="button" className="qlink" onClick={() => pickSource('synthetic')}>Use synthetic</button>
+              {slug !== 'ema_pullback' && <button type="button" className="qlink" onClick={() => pickSource('synthetic')}>Use synthetic</button>}
               <details><summary>What this assumes</summary>
                 <p>There is no bid/ask history, so a real order could fill worse, especially on stops. Expiry dates follow the weekday rule and lot size {r?.data ? r.data.lot_sizes.join('/') : ''} is {r?.data?.lot_source.startsWith('set') ? 'set by you' : 'taken from the day files'} until checked against NSE bhavcopy. Margin is an estimate. Not investment advice.</p>
               </details>
@@ -562,7 +562,7 @@ export function LabClient() {
               <span className="lbl">Nothing to run yet</span>
               <h2>{!local && !avail ? 'Checking which days are stored' : 'No real days to run'}</h2>
               <p>{!local && avail?.state === 'off' ? offMessage(avail.why) : !local && avail?.state === 'empty' ? `No ${seriesName} days are uploaded yet.` : range?.messages.find((m) => m.level === 'error')?.text ?? 'Pick a period with stored days, or load day files from this computer.'}</p>
-              {(local || avail) && <div className="run-actions">{(local || avail?.state === 'ready') && <button type="button" className="qbtn" onClick={() => showSec('period')}>Open the calendar</button>}<button type="button" className="qbtn" onClick={() => pickSource('synthetic')}>Use the synthetic model</button></div>}
+              {(local || avail) && <div className="run-actions">{(local || avail?.state === 'ready') && <button type="button" className="qbtn" onClick={() => showSec('period')}>Open the calendar</button>}{slug !== 'ema_pullback' && <button type="button" className="qbtn" onClick={() => pickSource('synthetic')}>Use the synthetic model</button>}</div>}
             </div>
           ) : !r ? (
             busy || (autoOn && canRun) ? (

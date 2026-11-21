@@ -9,7 +9,7 @@
 
   // ------------------------------------------------------------------ config
   const DEFAULTS = {
-    symbol: 'NIFTY', session_open: '09:15', exit_time: '15:15', lots: 1, tick: 0.05, expiry_choice: 'nearest',
+    symbol: 'NIFTY', session_open: '09:15', entry_time: '09:50', exit_time: '15:15', lots: 1, tick: 0.05, expiry_choice: 'nearest',
     or_minutes: 30, candle_minutes: 5, entry_mode: 'confirm', entry_condition: 'full', strike_offset: 0,
     sl_pct: 36.0, stop_type: 'leg', stop_fill: 'gap_aware',
     target_mode: 'strategy', target_basis: 'absolute', target_per_lot: 1000.0, target_pct: 30.0, max_loss_per_lot: 0.0,
@@ -20,7 +20,7 @@
     brokerage_per_order: 20.0, stt_sell_pct: 0.1, exch_pct: 0.03503, sebi_pct: 0.0001, stamp_buy_pct: 0.003, gst_pct: 18.0,
     rates_for: null,  // optional (date) => { stt_sell_pct, exch_pct, ... }: dated statutory rates (ledger.js); null keeps the flat rates above
     skip_expiry_day: false, min_or_width_pct: 0.0, max_or_width_pct: 100.0, max_entry_spread_pct: 100.0,
-    min_iv_proxy: 0.0, max_iv_proxy: 1000.0, weekdays: [0, 1, 2, 3, 4],
+    min_iv_proxy: 0.0, max_iv_proxy: 1000.0, min_vix: 0, max_vix: 100, weekdays: [0, 1, 2, 3, 4],
   };
   const ENUMS = {
     expiry_choice: ['nearest', 'next'], entry_mode: ['confirm', 'at_or_end'],
@@ -155,11 +155,12 @@
     for (let k = 0; k < nOr; k++) orC.push(cmap.get(openM + k * cm));
     if (orC.some(c => !c || !c.complete)) { res.reason = 'incomplete opening range'; return res; }
     let check, rng, T;
-    if (cfg.entry_mode === 'confirm') { check = cmap.get(openM + orm); rng = orC; T = openM + orm + cm; }
+    if (cfg.entry_mode === 'confirm') { T = hm(cfg.entry_time); check = cmap.get(T - cm); rng = orC; }
     else {
       check = orC[orC.length - 1]; rng = orC.slice(0, -1); T = openM + orm;
       if (!rng.length) { res.reason = 'at_or_end needs at least two opening-range candles'; return res; }
     }
+    if (T < openM + orm + cm) { res.reason = 'entry_time must be after the opening range and a completed confirmation candle'; return res; }
     if (!check || !check.complete) { res.reason = 'entry candle missing'; return res; }
     const hi = Math.max(...rng.map(c => c.h)), lo = Math.min(...rng.map(c => c.l));
     Object.assign(res, { or_high: hi, or_low: lo, check_candle: check, decision_t: T,
@@ -167,6 +168,8 @@
 
     const ei = s.times.indexOf(T);
     if (ei <= 0 || s.times[ei - 1] !== T - bm || s.und.c[ei - 1] == null) { res.reason = 'no execution bar at decision time'; return res; }
+    const entryVix = s.vix?.c?.[ei];
+    if ((cfg.min_vix > 0 || cfg.max_vix < 100) && (entryVix == null || entryVix < cfg.min_vix || entryVix > cfg.max_vix)) { res.status = 'filtered'; res.reason = entryVix == null ? 'India VIX bar missing for configured VIX filter' : 'India VIX outside configured range'; return res; }
     const spot = s.und.c[ei - 1];
     res.spot_at_entry = spot;
     if (!entryCheck(check, hi, lo, cfg.entry_condition)) {
@@ -813,7 +816,7 @@
     use_quotes: true, slip_pct: 0.5, slip_ticks: 1, stop_slip_mult: 2.0,
     brokerage_per_order: 20.0, stt_sell_pct: 0.1, exch_pct: 0.03503, sebi_pct: 0.0001, stamp_buy_pct: 0.003, gst_pct: 18.0,
     rates_for: null,
-    skip_expiry_day: false, min_or_width_pct: 0.0, max_or_width_pct: 100.0, min_gap_pct: -100.0, max_gap_pct: 100.0,
+    skip_expiry_day: false, min_or_width_pct: 0.0, max_or_width_pct: 100.0, min_gap_pct: -100.0, max_gap_pct: 100.0, min_vix: 0, max_vix: 100,
     max_or_width_rel: 0.0, or_avg_lookback: 10, weekdays: [0, 1, 2, 3, 4],
   };
   const ORB_ENUMS = {
@@ -1033,6 +1036,8 @@
       const pend = st.pending;
       st.pending = null;
       if (pend && pend.type === 'buy') {
+        const vix = s.vix?.c?.[i];
+        if ((cfg.min_vix > 0 || cfg.max_vix < 100) && (vix == null || vix < cfg.min_vix || vix > cfg.max_vix)) { flags.add(vix == null ? 'vix_missing_at_entry' : 'vix_filter'); continue; }
         const pick = i > 0 && und.c[i - 1] != null ? chooseContract(i, pend.dir) : null;
         if (!pick) { flags.add('entry_contract_unavailable'); ev(t, 'cancel', 'entry cancelled: no option price for the selected strike'); }
         else {
@@ -1242,6 +1247,161 @@
     const results = sessions.map(s => orbSimulate(s, cfg, ctxs[s.date]));
     return { config: cfg, config_hash: hashConfig(cfg), results, metrics: orbMetrics(results, cfg.lots, marginPerLot) };
   }
+
+  // ================================================================== STRATEGY 3: NIFTY EMA 10/20 pullback option buying
+  const EMA_DEFAULTS = { session_open: '09:15', entry_time: '09:50', exit_time: '15:15', lots: 1, slip_pct: 0.5,
+    brokerage_per_order: 20, stop_points: 15, stop_kind: 'fixed', max_structural_stop: 30, exit_method: 'rr1',
+    confirmation: 'engulf_or_rejection', max_hold_minutes: 120, max_trades: 3, strike_offset: 0, min_vix: 0, max_vix: 100,
+    liquidity_sweep: false, golden_enabled: true, silver_enabled: true };
+  const EMA_ENUMS = { stop_kind: ['fixed', 'structural'], exit_method: ['rr1', 'partial_2r', 'trailing_ema'],
+    confirmation: ['engulf_or_rejection', 'engulfing', 'rejection'] };
+  function emaConfig(overrides) {
+    const cfg = Object.assign({}, EMA_DEFAULTS, overrides || {});
+    for (const [k, vals] of Object.entries(EMA_ENUMS)) if (!vals.includes(cfg[k])) throw new Error(`${k}=${cfg[k]} invalid`);
+    cfg.lots = Math.max(1, Math.round(+cfg.lots || 1)); cfg.max_trades = Math.max(1, Math.round(+cfg.max_trades || 3));
+    if (!(cfg.stop_points > 0 && cfg.max_structural_stop > 0 && cfg.max_hold_minutes > 0)) throw new Error('EMA stop and holding limits must be positive');
+    return cfg;
+  }
+  function emaValues(xs, period) {
+    const out = new Array(xs.length).fill(null), alpha = 2 / (period + 1); let v = null, n = 0, seed = 0;
+    for (let i = 0; i < xs.length; i++) {
+      const x = xs[i]?.c;
+      if (x == null) { v = null; n = 0; seed = 0; continue; }
+      if (v == null) { seed += x; if (++n === period) { v = seed / period; out[i] = v; } }
+      else { v += alpha * (x - v); out[i] = v; }
+    }
+    return out;
+  }
+  function emaCandles(s) {
+    const out = [];
+    for (let t = 555; t + 5 <= 930; t += 5) {
+      const ix = Array.from({ length: 5 }, (_, j) => s.times.indexOf(t + j));
+      const ok = ix.every(i => i >= 0 && s.und.o[i] != null && s.und.h[i] != null && s.und.l[i] != null && s.und.c[i] != null);
+      out.push({ t, end: t + 5, complete: ok, o: ok ? s.und.o[ix[0]] : null,
+        h: ok ? Math.max(...ix.map(i => s.und.h[i])) : null, l: ok ? Math.min(...ix.map(i => s.und.l[i])) : null,
+        c: ok ? s.und.c[ix[4]] : null });
+    }
+    return out;
+  }
+  function emaConfirmation(c, p, dir, mode, prev) {
+    if (!c || !p || !prev) return false;
+    const body = Math.abs(c.c - c.o), span = c.h - c.l;
+    const engulf = dir > 0 ? c.c > c.o && p.c < p.o && c.c >= p.o && c.o <= p.c
+      : c.c < c.o && p.c > p.o && c.c <= p.o && c.o >= p.c;
+    const small = Math.abs(p.c - p.o) <= (p.h - p.l) * 0.4;
+    const morningEvening = dir > 0 ? prev.c < prev.o && small && c.c > c.o && c.c > (prev.o + prev.c) / 2
+      : prev.c > prev.o && small && c.c < c.o && c.c < (prev.o + prev.c) / 2;
+    const rejection = span > 0 && (dir > 0 ? c.c > c.o && Math.min(c.o, c.c) - c.l >= Math.max(body, span * 0.2) * 1.5 && c.c >= c.l + span * 0.7
+      : c.c < c.o && c.h - Math.max(c.o, c.c) >= Math.max(body, span * 0.2) * 1.5 && c.c <= c.h - span * 0.7);
+    return mode === 'engulfing' ? engulf || morningEvening : mode === 'rejection' ? rejection : engulf || rejection || morningEvening;
+  }
+  function emaSimulate(s, cfg) {
+    const res = { date: s.date, symbol: s.symbol, strategy: 'ema_pullback', status: 'no_entry', reason: null,
+      flags: [], events: [], fills: [], trades: [], setups: [], mtm: [], candles: [], vix: null };
+    if (!s.vix) res.flags.push('India VIX missing for session');
+    const bars = emaCandles(s), e10 = emaValues(bars, 10), e20 = emaValues(bars, 20);
+    res.candles = bars; res.ema10 = e10; res.ema20 = e20;
+    const times = s.times, trades = [], fills = [], setups = [], events = [];
+    const eligibleVix = s.vix?.c?.filter(x => x != null) || [];
+    res.vix = eligibleVix.length ? { open: eligibleVix[0], close: eligibleVix.at(-1), high: Math.max(...eligibleVix), low: Math.min(...eligibleVix) } : null;
+    let consumed = -1;
+    for (let k = 21; k < bars.length && trades.length < cfg.max_trades; k++) {
+      const c = bars[k], p = bars[k - 1], prev = bars[k - 2];
+      if (!c.complete || !p.complete || !prev.complete || c.end < hm(cfg.entry_time) || c.end >= hm('14:00') || c.end <= consumed) continue;
+      if (e10[k] == null || e20[k] == null || e10[k - 1] == null || e20[k - 1] == null) continue;
+      const bullish = e10[k] > e20[k] && e10[k] > e10[k - 1] && e20[k] > e20[k - 1];
+      const bearish = e10[k] < e20[k] && e10[k] < e10[k - 1] && e20[k] < e20[k - 1];
+      const dir = bullish ? 1 : bearish ? -1 : 0;
+      if (!dir) continue;
+      const zoneLo = Math.min(e10[k], e20[k]), zoneHi = Math.max(e10[k], e20[k]);
+      const extension = bars.slice(Math.max(20, k - 5), k - 1).some(x => x.complete && (dir > 0 ? x.h >= zoneHi + cfg.stop_points : x.l <= zoneLo - cfg.stop_points));
+      const pulled = extension && [p, prev].some(x => x.l <= zoneHi && x.h >= zoneLo) && (dir > 0 ? c.c > zoneHi : c.c < zoneLo);
+      if (!pulled || !emaConfirmation(c, p, dir, cfg.confirmation, prev)) continue;
+      const entryT = c.end, i = times.indexOf(entryT);
+      if (i < 0 || s.und.o[i] == null) { setups.push({ t: entryT, status: 'rejected', reason: 'next 1-minute NIFTY bar missing' }); continue; }
+      if ((entryT < 720 && !cfg.golden_enabled) || (entryT >= 720 && !cfg.silver_enabled)) { setups.push({ t: entryT, status: 'filtered', reason: 'entry session disabled' }); continue; }
+      const vix = s.vix?.c?.[i];
+      if (vix == null && (cfg.min_vix > 0 || cfg.max_vix < 100)) { setups.push({ t: entryT, status: 'filtered', reason: 'India VIX bar missing for configured VIX filter' }); continue; }
+      if (vix < cfg.min_vix || vix > cfg.max_vix) { setups.push({ t: entryT, status: 'filtered', reason: 'India VIX outside configured range' }); continue; }
+      if (cfg.liquidity_sweep) {
+        const prior = bars.slice(Math.max(0, k - 5), k - 2).filter(x => x.complete);
+        const swing = prior.length ? (dir > 0 ? Math.min(...prior.map(x => x.l)) : Math.max(...prior.map(x => x.h))) : null;
+        const swept = swing != null && (dir > 0 ? p.l < swing && p.c > swing : p.h > swing && p.c < swing);
+        if (!swept) { setups.push({ t: entryT, status: 'filtered', reason: 'no confirmed prior swing liquidity sweep' }); continue; }
+      }
+      const spot = s.und.o[i], cp = dir > 0 ? 'CE' : 'PE';
+      const ex = [...s.expiries].filter(x => x.expiry >= s.date && Object.keys(x.contracts).some(key => key.startsWith(cp + ':') && x.contracts[key].o[i] != null))
+        .sort((a, b) => a.expiry.localeCompare(b.expiry))[0];
+      if (!ex) { setups.push({ t: entryT, status: 'rejected', reason: `no historical ${cp} option price at entry` }); continue; }
+      const ks = Object.keys(ex.contracts).filter(key => key.startsWith(cp + ':') && ex.contracts[key].o[i] != null).map(key => +key.split(':')[1]).sort((a,b)=>a-b);
+      let atm = ks.reduce((best, kx) => Math.abs(kx - spot) < Math.abs(best - spot) ? kx : best, ks[0]);
+      const steps = Math.round(cfg.strike_offset || 0), step = ks.length > 1 ? Math.min(...ks.slice(1).map((x,j)=>x-ks[j])) : 50;
+      const strike = atm + (cp === 'CE' ? -steps : steps) * step;
+      const con = ex.contracts[cp + ':' + strike];
+      if (!con?.o?.[i]) { setups.push({ t: entryT, status: 'rejected', reason: `selected ${cp} strike has no price` }); continue; }
+      const pullback = [p, prev].filter(x => x.l <= zoneHi && x.h >= zoneLo);
+      const stop = cfg.stop_kind === 'structural' ? (dir > 0 ? Math.min(...pullback.map(x => x.l)) : Math.max(...pullback.map(x => x.h))) : spot - dir * Number(cfg.stop_points);
+      const risk = dir * (spot - stop);
+      if (!(risk > 0) || (cfg.stop_kind === 'structural' && risk > cfg.max_structural_stop)) {
+        setups.push({ t: entryT, status: 'rejected', reason: 'structural stop exceeds maximum permitted risk' }); continue;
+      }
+      const slip = Number(cfg.slip_pct) / 100, entryPx = con.o[i] * (1 + slip);
+      const trade = { id: trades.length + 1, date: s.date, dir, cp, strike, expiry: ex.expiry, is_expiry_day: ex.expiry === s.date,
+        session: entryT < 720 ? 'golden' : entryT < 840 ? 'silver' : 'bronze', lot_size: ex.lot_size,
+        qty: cfg.lots * ex.lot_size, entry_t: entryT, entry_px: entryPx, stop, target: spot + dir * risk,
+        exit_t: null, exit_px: null, exit_reason: null, gross: 0, net: 0, hold_min: 0, mae: 0, mfe: 0 };
+      fills.push({ date: s.date, t: entryT, leg: String(trade.id), side: cp, strike, expiry: ex.expiry, action: 'BUY', px: entryPx, qty: trade.qty, reason: 'entry', cost: 0 });
+      res.mtm.push({ t: entryT, id: String(trade.id), px: entryPx });
+      let position = trade.qty, partialDone = false, exitAt = null, reason = null;
+      for (let j = i; j < times.length && times[j] < hm(cfg.exit_time); j++) {
+        if (s.und.o[j] == null) continue;
+        if (con.c[j] != null) { res.mtm.push({ t: times[j], id: String(trade.id), px: con.c[j] }); const move = (con.c[j] - entryPx) * trade.qty; trade.mae = Math.min(trade.mae, move); trade.mfe = Math.max(trade.mfe, move); }
+        const adverse = dir > 0 ? s.und.l[j] <= trade.stop : s.und.h[j] >= trade.stop;
+        const target1 = dir > 0 ? s.und.h[j] >= trade.target : s.und.l[j] <= trade.target;
+        const target2 = dir > 0 ? s.und.h[j] >= spot + dir * 2 * risk : s.und.l[j] <= spot + dir * 2 * risk;
+        const hit = adverse ? (partialDone ? 'breakeven stop' : 'stop') : target2 && cfg.exit_method === 'partial_2r' && partialDone ? 'target' : target1 && cfg.exit_method === 'rr1' ? 'target' : null;
+        if (hit) { const x = times.indexOf(times[j] + 1); exitAt = x >= 0 ? x : j; reason = hit; break; }
+        if (target1 && cfg.exit_method === 'partial_2r' && !partialDone) {
+          const qty = Math.max(1, Math.floor(trade.qty / 2)); partialDone = true; position -= qty;
+          let x = -1; for (let z = j + 1; z < times.length && times[z] <= hm(cfg.exit_time); z++) if (con.o[z] != null) { x = z; break; }
+          if (x >= 0) { const px = con.o[x] * (1 - slip); fills.push({ date: s.date, t: times[x], leg: String(trade.id), side: cp, strike, expiry: ex.expiry, action: 'SELL', px, qty, reason: 'partial', cost: 0 }); }
+          else { position += qty; partialDone = false; res.flags.push('partial_exit_option_bar_missing'); }
+          trade.stop = spot;
+        }
+        if (cfg.exit_method === 'trailing_ema' && target1) trade.trailing = true;
+        if (cfg.exit_method === 'trailing_ema' && trade.trailing) {
+          const trailK = bars.findIndex(x => x.end > times[j]) - 1;
+          if (trailK >= 0 && e10[trailK] != null) trade.stop = dir > 0 ? Math.max(trade.stop, e10[trailK]) : Math.min(trade.stop, e10[trailK]);
+        }
+        if (times[j] - entryT >= cfg.max_hold_minutes) { const x=times.indexOf(times[j]+1); exitAt=x>=0?x:j; reason='time'; break; }
+      }
+      if (exitAt == null) { exitAt = times.findIndex(t => t >= hm(cfg.exit_time)); if (exitAt < 0) exitAt = times.length - 1; reason = 'eod'; }
+      if (con.o[exitAt] == null) {
+        const next = con.o.findIndex((v, x) => x > exitAt && v != null && times[x] <= hm(cfg.exit_time));
+        if (next >= 0) { exitAt = next; flags.push('option_exit_bar_missing_used_next_available'); }
+        else { for (let x = exitAt; x >= i; x--) if (con.o[x] != null) { exitAt = x; break; } flags.push('option_exit_bar_missing_used_last_available'); }
+      }
+      const exitPx = con.o[exitAt] * (1 - slip);
+      fills.push({ date: s.date, t: times[exitAt], leg: String(trade.id), side: cp, strike, expiry: ex.expiry, action: 'SELL', px: exitPx, qty: position, reason, cost: 0 });
+      trade.exit_t = times[exitAt]; trade.exit_px = exitPx; trade.exit_reason = reason;
+      trade.gross = fills.filter(f => f.leg === String(trade.id)).reduce((n, f) => n + (f.action === 'BUY' ? -1 : 1) * f.px * f.qty, 0);
+      trade.net = trade.gross; trade.hold_min = trade.exit_t - entryT; trades.push(trade);
+      const exitBar = bars.find(x => x.end >= trade.exit_t); consumed = exitBar ? exitBar.end : c.end;
+      events.push({ t: entryT, kind: 'entry', text: `Buy NIFTY ${cp} ${strike}; ${dir > 0 ? 'bullish' : 'bearish'} EMA pullback` });
+      setups.push({ t: entryT, status: 'traded', reason: null });
+    }
+    Object.assign(res, { trades, fills, setups, events });
+    if (trades.length) { res.status = 'traded'; res.net = trades.reduce((n,t)=>n+t.net,0); res.gross = res.net; res.exit_reason = trades.at(-1).exit_reason; }
+    else { res.status = 'no_entry'; res.reason = setups.at(-1)?.reason || 'no confirmed EMA pullback setup'; }
+    return res;
+  }
+  function emaMetrics(results, lots, marginPerLot) { return orbMetrics(results, lots, marginPerLot); }
+  function emaRun(sessions, cfg, marginPerLot) {
+    const results = sessions.map(s => emaSimulate(s, cfg));
+    return { config: cfg, config_hash: hashConfig(cfg), results, metrics: emaMetrics(results, cfg.lots, marginPerLot) };
+  }
+  const EMA = { DEFAULTS: EMA_DEFAULTS, makeConfig: emaConfig, simulate: emaSimulate, run: emaRun,
+    emaValues, candles: emaCandles, confirmation: emaConfirmation };
 
   const ORB_VARIANTS = [
     ['—', 'Baseline rules', {}],
@@ -1522,5 +1682,5 @@
 
   return { DEFAULTS, ENUMS, makeConfig, hashConfig, hm, fmtHM, fillCost, simulate, resample, entryCheck,
     SCENARIOS, SYN_BASE, generate, syntheticCalendar, mulberry32, bs, computeMetrics, regimeTags, VARIANTS,
-    runBacktest, sensitivity, walkForward, parseCSV, loadCSV, commentary, dailyCore, ORB, STRATEGIES };
+    runBacktest, sensitivity, walkForward, parseCSV, loadCSV, commentary, dailyCore, ORB, EMA, STRATEGIES };
 });
