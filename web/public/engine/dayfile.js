@@ -5,6 +5,10 @@
  * Dhan's rolling series are labelled by distance from ATM (ATM-10..ATM+10) and report the actual
  * strike on every bar. The engines key contracts by actual strike, so each bar is filed under
  * "CE:<strike>" / "PE:<strike>". A fixed strike therefore has prices only while it was within ATM+-10.
+ *
+ * A minute with no price is an empty slot in its array (it reads as undefined), never a stored null: an array of
+ * numbers with gaps keeps its numbers unboxed (8 bytes each), while a single null makes every number a separate
+ * heap object (about 2.5x the memory). Engines test prices with `== null`, which is true for both.
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -26,7 +30,7 @@
     const o = undelta(b.o), n = o.length;
     const r = { o: new Array(n), h: new Array(n), l: new Array(n), c: new Array(n) };
     for (let i = 0; i < n; i++) {
-      if (o[i] == null || b.h[i] == null || b.l[i] == null || b.c[i] == null) { r.o[i] = r.h[i] = r.l[i] = r.c[i] = null; continue; }
+      if (o[i] == null || b.h[i] == null || b.l[i] == null || b.c[i] == null) continue; // left empty: no price this minute
       r.o[i] = o[i] / scale; r.h[i] = (o[i] + b.h[i]) / scale; r.l[i] = (o[i] - b.l[i]) / scale; r.c[i] = (o[i] + b.c[i]) / scale;
     }
     return r;
@@ -42,12 +46,13 @@
     let und;
     if (doc.index) und = ohlc(doc.index, scale);
     else {
-      const sp = undelta(doc.spot).map(v => (v == null ? null : v / scale));
-      und = { o: sp.slice(), h: sp.slice(), l: sp.slice(), c: sp.slice() };
+      const sp = undelta(doc.spot);
+      und = { o: new Array(n), h: new Array(n), l: new Array(n), c: new Array(n) };
+      for (let i = 0; i < n; i++) if (sp[i] != null) { const v = sp[i] / scale; und.o[i] = v; und.h[i] = v; und.l[i] = v; und.c[i] = v; }
       flags.push('index_from_spot');
     }
     const contracts = {};
-    const blank = () => new Array(n).fill(null);
+    const blank = () => new Array(n); // empty slots until a price arrives (see the note at the top)
     let collisions = 0;
     for (const s of doc.series) {
       const k = undelta(s.k), p = ohlc(s, scale);
@@ -72,25 +77,52 @@
   }
 
   async function gunzipJSON(buf) {
+    return (await unpack(buf, null)).doc;
+  }
+
+  const hex = (ab) => Array.from(new Uint8Array(ab), (b) => b.toString(16).padStart(2, '0')).join('');
+  /**
+   * Unpacks a day file and, when its sha256 is known (market_days.sha256: the hash of the JSON before gzip), checks
+   * it: a file that does not match is refused, never decoded. { doc, checked } — checked is false only when no hash
+   * was given or this browser has no Web Crypto (an insecure http:// page).
+   */
+  async function unpack(buf, sha256) {
     if (typeof DecompressionStream === 'undefined') throw new Error('This browser cannot unpack day files (no DecompressionStream).');
     const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
-    return JSON.parse(await new Response(stream).text());
+    const raw = await new Response(stream).arrayBuffer();
+    const subtle = typeof crypto !== 'undefined' && crypto.subtle;
+    let checked = false;
+    if (sha256 && subtle) {
+      const got = hex(await subtle.digest('SHA-256', raw));
+      if (got !== String(sha256).toLowerCase()) {
+        const e = new Error(`a day file does not match its checksum (expected ${String(sha256).slice(0, 12)}…, got ${got.slice(0, 12)}…)`);
+        e.code = 'CHECKSUM';
+        throw e;
+      }
+      checked = true;
+    }
+    return { doc: JSON.parse(new TextDecoder().decode(raw)), checked };
   }
 
   /**
    * One session per date: day files of the same date from different expiry series (WEEK, MONTH) become one session
    * with one expiry entry per series, so a strategy can hold legs in both. The index comes from the first file.
+   * The inputs are never changed (a worker keeps decoded sessions and reuses them): a merged date is a new object.
    */
   function mergeSessions(list) {
-    const byDate = new Map();
+    const byDate = new Map(), copies = new Set();
     for (const s of list) {
-      const have = byDate.get(s.date);
+      let have = byDate.get(s.date);
       if (!have) { byDate.set(s.date, s); continue; }
+      if (!copies.has(have)) {
+        have = Object.assign({}, have, { expiries: have.expiries.slice(), meta: Object.assign({}, have.meta, { flags: have.meta.flags.slice() }) });
+        copies.add(have); byDate.set(s.date, have);
+      }
       for (const ex of s.expiries) if (!have.expiries.some(e => e.series === ex.series)) have.expiries.push(ex);
       for (const f of s.meta.flags) if (!have.meta.flags.includes(f)) have.meta.flags.push(f);
     }
     return [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : 1));
   }
 
-  return { undelta, toSession, gunzipJSON, mergeSessions };
+  return { undelta, toSession, gunzipJSON, unpack, mergeSessions };
 });

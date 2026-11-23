@@ -32,7 +32,9 @@ export interface RunResult {
   /** The financial ledger and report for the run (straddle and ORB). Absent for the four-leg stock model. */
   account?: Account;
   /** Present when the run used real day files instead of the synthetic model. `range_key` is the DateRange key it ran on. */
-  data?: { source: 'dhan'; from: string; to: string; days: number; lot_sizes: number[]; lot_source: string; expiry_source: string; flags: string[]; range_key?: string | null };
+  data?: { source: 'dhan'; from: string; to: string; days: number; lot_sizes: number[]; lot_source: string; expiry_source: string; flags: string[]; range_key?: string | null;
+    /** day files checked against the inventory's sha256 before use, of the files the run used */
+    checksums?: { checked: number; files: number } };
   /** One outcome per session the engine received (straddle, ORB, legs). docs/ENGINE_INTERFACES.md §2. */
   days?: DayOutcome[];
   /** Leg engine only: every position with its legs, payoff and exit (docs/ENGINE_INTERFACES.md §2). */

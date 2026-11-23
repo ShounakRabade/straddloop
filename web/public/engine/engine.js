@@ -757,8 +757,14 @@
     ['F', 'Exit 14:45', { exit_time: '14:45' }],
   ];
 
+  // Progress hook for the page: called with (index, count) before each session is simulated. Set by compute.run for
+  // the length of one run (the Lab worker reports it); null otherwise, so nothing else changes.
+  let tick = null;
+  function setTick(fn) { tick = typeof fn === 'function' ? fn : null; }
+  const ticked = (sessions, fn) => sessions.map((s, i) => { if (tick) tick(i, sessions.length); return fn(s); });
+
   function runBacktest(sessions, cfg, marginPerLot) {
-    const results = sessions.map(s => simulate(s, cfg));
+    const results = ticked(sessions, s => simulate(s, cfg));
     return { config: cfg, config_hash: hashConfig(cfg), results, metrics: computeMetrics(results, cfg.lots, marginPerLot) };
   }
 
@@ -1249,7 +1255,7 @@
 
   function orbRun(sessions, cfg, marginPerLot) {
     const ctxs = orbContexts(sessions, cfg.or_avg_lookback, cfg.or_minutes, cfg.candle_minutes);
-    const results = sessions.map(s => orbSimulate(s, cfg, ctxs[s.date]));
+    const results = ticked(sessions, s => orbSimulate(s, cfg, ctxs[s.date]));
     return { config: cfg, config_hash: hashConfig(cfg), results, metrics: orbMetrics(results, cfg.lots, marginPerLot) };
   }
 
@@ -1402,7 +1408,7 @@
   }
   function emaMetrics(results, lots, marginPerLot) { return orbMetrics(results, lots, marginPerLot); }
   function emaRun(sessions, cfg, marginPerLot) {
-    const results = sessions.map(s => emaSimulate(s, cfg));
+    const results = ticked(sessions, s => emaSimulate(s, cfg));
     return { config: cfg, config_hash: hashConfig(cfg), results, metrics: emaMetrics(results, cfg.lots, marginPerLot) };
   }
   const EMA = { DEFAULTS: EMA_DEFAULTS, makeConfig: emaConfig, simulate: emaSimulate, run: emaRun,
@@ -1685,7 +1691,7 @@
     return out;
   }
 
-  return { DEFAULTS, ENUMS, makeConfig, hashConfig, hm, fmtHM, fillCost, simulate, resample, entryCheck,
+  return { setTick, DEFAULTS, ENUMS, makeConfig, hashConfig, hm, fmtHM, fillCost, simulate, resample, entryCheck,
     SCENARIOS, SYN_BASE, generate, syntheticCalendar, mulberry32, bs, computeMetrics, regimeTags, VARIANTS,
     runBacktest, sensitivity, walkForward, parseCSV, loadCSV, commentary, dailyCore, ORB, EMA, STRATEGIES };
 });

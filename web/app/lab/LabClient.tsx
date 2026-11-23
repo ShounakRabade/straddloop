@@ -12,7 +12,8 @@ import { useLab, type DayRef } from '@/lib/useLab';
 import { useSession } from '@/lib/useSession';
 import { cloudEnabled } from '@/lib/supabase';
 import { saveRun } from '@/lib/store';
-import { availability, download, readLocal, statuses, type Availability, type ExpiryFlag } from '@/lib/marketData';
+import { availability, readLocal, statuses, type Availability, type ExpiryFlag } from '@/lib/marketData';
+import { fetchDays, forgetDays } from '@/lib/dayCache';
 import { boundsOf, buildDateRange, presetRange, rollingWindows, type InventoryDay, type StatusRow } from '@/lib/dateRange';
 import { ENGINE_ONLY_KEYS, PARAM_SPACE, choiceLabel } from '@/lib/researchSpace';
 import { SECTIONS, SUBGROUP, sectionOf, type SectionId } from '@/lib/labSections';
@@ -73,7 +74,8 @@ export function LabClient() {
   const [dayStatus, setDayStatus] = useState<StatusRow[]>(NO_STATUS);
   const [local, setLocal] = useState<LocalDay[] | null>(null);
   const [request, setRequest] = useState<{ from: string; to: string }>({ from: '', to: '' });
-  const [loading, setLoading] = useState<{ done: number; total: number } | null>(null);
+  // day files being fetched for a run: how many came from this browser, how many were downloaded, of how many
+  const [loading, setLoading] = useState<{ cached: number; downloaded: number; total: number } | null>(null);
   const [dataErr, setDataErr] = useState<string | null>(null);
   const [open, setOpen] = useState<Set<SectionId>>(() => new Set<SectionId>(['strategy', 'data']));
   const [rail, setRail] = useState<'open' | 'collapsed'>('open');
@@ -101,19 +103,18 @@ export function LabClient() {
       if (paths.some((p) => !have.get(p))) throw new Error(`This study ran on ${paths.length} day files from this computer (${d.from} to ${d.to}). Load those files again to continue it or draw its curves.`);
       return paths.map((p) => ({ path: p, buf: (have.get(p) as ArrayBuffer).slice(0) }));
     }
-    const got = await download(paths, (done) => onProgress(done, paths.length));
-    const by = new Map(got.map((g) => [g.path, g.buf]));
-    return paths.map((p) => ({ path: p, buf: by.get(p)! }));
+    const sha = d.sha256 ?? [];
+    return fetchDays(paths.map((p, i) => ({ path: p, sha256: sha[i] ?? null })), (x) => onProgress(x.cached + x.downloaded, x.total));
   }, []);
   const opt = useOptimiser(loadDays);
   const pendingRun = useRef(false);
+  const dlStop = useRef<{ aborted: boolean } | null>(null);
   const [timeStep, setTimeStep] = useTimeInterval();
   const { session, ready: sessionReady } = useSession();
   const strategy = labStrategy(slug) ?? REGISTRY[0];
   const isFourleg = strategy.engine === 'fourleg';
   const realOk = strategy.realOk;
   const real = source === 'real' && realOk;
-  const sent = useRef(new Set<string>());
   const pending = useRef<Meta | null>(null);
   const toggleBtn = useRef<HTMLButtonElement>(null);
   const railHead = useRef<HTMLButtonElement>(null);
@@ -221,13 +222,15 @@ export function LabClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [strategy, params, lotSet, engineSet.length]);
 
+  // the inventory's sha256 of each stored day file (the engine checks every file against it)
+  const shaOf = useMemo(() => new Map((range?.days ?? []).flatMap((d) => (d.file ? [[d.file.path, d.file.sha256 ?? null] as const] : []))), [range]);
   const studyData = useMemo((): StudyData | null => {
     if (!real) return isFourleg ? null : { source: 'synthetic', label: `Synthetic · seed ${params.seed}`, from: null, to: null, sessions: Number(params.days) || 120, key: dataKey,
       synthetic: { days: Number(params.days) || 120, seed: Number(params.seed) || 1, iv: Number(params.iv) || 13 }, lotSize: 0 };
     if (!range || !range.runnable.length) return null;
     return { source: local ? 'local' : 'dhan', label: `Real NIFTY ${flag === 'WEEK' ? 'weekly' : 'monthly'}${local ? ' · files from this computer' : ''}`, from: range.runnable[0], to: range.runnable[range.runnable.length - 1],
-      sessions: range.runnable.length, key: dataKey, paths: range.files.map((f) => f.path), lotSize: Number(params.lot_size) || 0 };
-  }, [real, isFourleg, params.seed, params.days, params.iv, params.lot_size, dataKey, range, local, flag]);
+      sessions: range.runnable.length, key: dataKey, paths: range.files.map((f) => f.path), sha256: range.files.map((f) => shaOf.get(f.path) ?? null), lotSize: Number(params.lot_size) || 0 };
+  }, [real, isFourleg, params.seed, params.days, params.iv, params.lot_size, dataKey, range, local, flag, shaOf]);
 
   const runNow = useCallback(async () => {
     if (!canRun || loading) return;
@@ -237,28 +240,33 @@ export function LabClient() {
     if (!real) { pending.current = m; lab.run(runParams); return; }
     const r = range!;
     setDataErr(null);
-    const missing = r.files.filter((f) => !sent.current.has(f.path));
-    let fresh: { path: string; buf: ArrayBuffer }[] = [];
+    const lot = Number(runParams.lot_size) || 0;
+    // only the days the engine does not hold yet: from this computer, from this browser's copies, or downloaded
+    const missing = r.files.filter((f) => !lab.holds(f.path, lot));
+    let fresh: { path: string; buf: ArrayBuffer; sha256: string | null }[] = [];
     try {
-      if (local) fresh = missing.map((f) => ({ path: f.path, buf: (local.find((x) => x.path === f.path)!.buf as ArrayBuffer).slice(0) }));
+      if (local) fresh = missing.map((f) => ({ path: f.path, buf: (local.find((x) => x.path === f.path)!.buf as ArrayBuffer).slice(0), sha256: null }));
       else if (missing.length) {
-        setLoading({ done: 0, total: missing.length });
-        fresh = await download(missing.map((f) => f.path), (done) => setLoading({ done, total: missing.length }));
+        setLoading({ cached: 0, downloaded: 0, total: missing.length });
+        const stop = { aborted: false };
+        dlStop.current = stop;
+        fresh = await fetchDays(missing.map((f) => ({ path: f.path, sha256: shaOf.get(f.path) ?? null })), (x) => setLoading(x), stop);
       }
     } catch (e) {
       setLoading(null);
+      if ((e as { code?: string }).code === 'CANCELLED') return; // stopped by the person; what arrived is kept in this browser
       setDataErr(`Could not download the day files: ${(e as Error).message}. Nothing ran; press Run to try again.`);
       return;
     }
     setLoading(null);
-    fresh.forEach((f) => sent.current.add(f.path));
-    const bufs = new Map(fresh.map((f) => [f.path, f.buf]));
-    const days: DayRef[] = r.files.map((f) => ({ path: f.path, buf: bufs.get(f.path) }));
+    const bufs = new Map(fresh.map((f) => [f.path, f]));
+    const days: DayRef[] = r.files.map((f) => ({ path: f.path, buf: bufs.get(f.path)?.buf, sha256: bufs.get(f.path)?.sha256 ?? null }));
     pending.current = m;
     lab.run(runParams, days);
-  }, [canRun, loading, configKey, dataKey, isDefault, real, lab, range, local, runParams]);
+  }, [canRun, loading, configKey, dataKey, isDefault, real, lab, range, local, runParams, shaOf]);
   const runRef = useRef(runNow);
   runRef.current = runNow;
+  useEffect(() => { if (lab.status === 'error' && lab.code === 'CHECKSUM' && lab.paths) forgetDays(lab.paths); }, [lab.status, lab.code, lab.paths]);
   // "Run a backtest" from a study: run once the loaded settings (and their period) are in place
   useEffect(() => {
     if (!pendingRun.current || !canRun || lab.status === 'running' || loading) return;
@@ -385,7 +393,7 @@ export function LabClient() {
     if (!files?.length) return;
     const got = await readLocal(files);
     if (!got.length) { setDataErr('None of those files look like day files (for example NIFTY/WEEK/2025-10-06.json.gz). Make them with: straddloop export-days'); return; }
-    sent.current.clear();
+    lab.forget();
     setLocal(got);
     setRequest({ from: got[0].date, to: got[got.length - 1].date });
   }
@@ -463,8 +471,25 @@ export function LabClient() {
   if (strategy.blocked) checks.push({ ok: 'false', t: strategy.blocked });
   if (dataErr) checks.push({ ok: 'false', t: dataErr });
 
-  const runLabel = loading ? `Downloading ${loading.done}/${loading.total}` : lab.status === 'running' ? 'Running…' : r && !stale ? 'Run again' : 'Run backtest';
-  const status = lab.status === 'error' ? { s: 'error', t: 'Stopped' } : busy ? { s: 'running', t: loading ? 'Downloading' : 'Running' }
+  // what a run is doing, in the words and counts the worker reports (never estimated)
+  const prog = lab.progress;
+  const toFetch = loading ? loading.total - loading.cached : 0;
+  const phase: { short: string; long: string; done: number | null; total: number | null } | null = loading
+    ? (toFetch > 0 ? { short: `Downloading ${loading.downloaded}/${toFetch}`, long: `Downloading day files: ${loading.downloaded} of ${toFetch}${loading.cached ? ` (${loading.cached} already in this browser)` : ''}`, done: loading.downloaded, total: toFetch }
+      : { short: 'Reading days', long: `Reading ${loading.total} day files kept in this browser`, done: null, total: null })
+    : lab.status !== 'running' ? null
+      : prog?.phase === 'decode' ? { short: `Unpacking ${prog.done}/${prog.total}`, long: `Unpacking and checking day files: ${prog.done} of ${prog.total}`, done: prog.done ?? 0, total: prog.total ?? 0 }
+        : prog?.phase === 'simulate' ? { short: `Session ${(prog.done ?? 0) + 1}/${prog.total}`, long: `Simulating session ${(prog.done ?? 0) + 1} of ${prog.total}`, done: prog.done ?? 0, total: prog.total ?? 0 }
+          : prog?.phase === 'ledger' ? { short: 'Booking ledger', long: 'Booking every fill in the account ledger', done: null, total: null }
+            : { short: 'Starting…', long: 'Starting the engine', done: null, total: null };
+  // the cancelled run produced nothing: forget its settings, so the result still on screen keeps the settings it was run
+  // with (`tried` stays, so auto-run does not start the cancelled settings again)
+  const cancelRun = () => { pending.current = null; if (loading) { if (dlStop.current) dlStop.current.aborted = true; } else lab.cancel(); };
+  const progressBar = (p: NonNullable<typeof phase>, w = 'min(420px, 100%)') => (p.total
+    ? <div className="progress" style={{ width: w }} role="progressbar" aria-label={p.long} aria-valuemin={0} aria-valuemax={p.total} aria-valuenow={p.done ?? 0}><i style={{ width: `${(100 * (p.done ?? 0)) / Math.max(1, p.total)}%` }} /></div>
+    : <div className="progress" data-indeterminate style={{ width: w }} role="progressbar" aria-label={p.long}><i /></div>);
+  const runLabel = phase ? phase.short : r && !stale ? 'Run again' : 'Run backtest';
+  const status = lab.status === 'error' ? { s: 'error', t: 'Stopped' } : busy ? { s: 'running', t: phase?.short ?? 'Running' }
     : stale ? { s: 'stale', t: 'Settings changed' } : r ? { s: 'done', t: `Done in ${(lab.ms / 1000).toFixed(1)}s` } : { s: 'idle', t: 'Ready' };
   const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
   const g = guide != null ? GUIDE[guide] : null;
@@ -477,13 +502,18 @@ export function LabClient() {
     </button>
   );
 
-  const optButton = (cls = '') => (
+  const optButton = (cls = '') => (busy ? (
+    <button type="button" className={`opt-btn opt-btn--cancel ${cls}`} onClick={cancelRun}
+      title={loading ? 'Stop downloading (what has arrived is kept in this browser)' : 'Stop this run now'}>
+      <Icon.close /><span>Cancel</span>
+    </button>
+  ) : (
     <button type="button" className={`opt-btn ${cls}`} aria-label="Optimise" aria-pressed={view === 'optimise'} disabled={!booted || !strategy.optimise.ok}
       title={strategy.optimise.ok ? 'Search ranges of these settings, with validation' : strategy.optimise.why}
       onClick={() => { setView((v) => (v === 'optimise' ? 'results' : 'optimise')); setDrawer(false); }}>
       <Icon.sliders /><span>Optimise</span>
     </button>
-  );
+  ));
 
   return (
     <div className="ws" data-rail={rail} data-drawer={drawer ? 'open' : 'closed'}>
@@ -620,7 +650,7 @@ export function LabClient() {
                 <p className="sec-note">
                   {local ? `${local.length} day files from this computer. ` : avail?.state === 'ready' ? `${avail.days.length} ${seriesName} days stored, ${shortDate(avail.days[0].trade_date)} to ${shortDate(avail.days[avail.days.length - 1].trade_date)}. ` : ''}
                   {local
-                    ? <button type="button" className="qlink" onClick={() => { setLocal(null); sent.current.clear(); setRequest({ from: '', to: '' }); }}>Use the stored data instead</button>
+                    ? <button type="button" className="qlink" onClick={() => { setLocal(null); lab.forget(); setRequest({ from: '', to: '' }); }}>Use the stored data instead</button>
                     : <label className="qlink" style={{ cursor: 'pointer' }}>Load day files from this computer<input type="file" accept=".gz" multiple className="sr" onChange={(e) => pickFiles(e.target.files)} /></label>}
                 </p>
               </>
@@ -716,9 +746,10 @@ export function LabClient() {
           ) : !r ? (
             busy || (autoOn && canRun) ? (
               <div className="ws-empty" aria-live="polite">
-                <span className="lbl">{loading ? 'Downloading day files' : 'Simulating'}</span>
-                <h2>{loading ? `Downloading ${loading.done} of ${loading.total} days` : real ? `Replaying ${range?.runnable.length ?? 0} real sessions` : 'Replaying every fill'}</h2>
-                {loading && <div className="progress" style={{ width: 'min(420px, 100%)' }} role="progressbar" aria-valuemin={0} aria-valuemax={loading.total} aria-valuenow={loading.done}><i style={{ width: `${(100 * loading.done) / Math.max(1, loading.total)}%` }} /></div>}
+                <span className="lbl">{loading ? 'Day files' : real ? `${range?.runnable.length ?? 0} real sessions` : 'Synthetic model'}</span>
+                <h2>{phase ? phase.long : 'Starting the engine'}</h2>
+                {phase && progressBar(phase)}
+                {busy && <div className="run-actions"><button type="button" className="qbtn" onClick={cancelRun}>Cancel</button></div>}
                 <div className="skel" style={{ width: 'min(640px, 100%)' }} aria-hidden="true"><i /><i style={{ width: '80%' }} /><i style={{ width: '60%' }} /></div>
               </div>
             ) : (
@@ -749,10 +780,23 @@ export function LabClient() {
                   <button type="button" className="qbtn" aria-expanded={saveOpen} onClick={() => setSaveOpen((s) => !s)}>Save to notebook</button>
                 </div>
               </div>
+              {busy && phase && (
+                <div className="runbar" role="status" aria-live="polite">
+                  <span>{phase.long}</span>
+                  {progressBar(phase, 'min(260px, 100%)')}
+                  <button type="button" className="qlink" onClick={cancelRun}>Cancel</button>
+                </div>
+              )}
+              {lab.detached && !busy && (
+                <div className="stale" role="status">
+                  <span>The run after this one was cancelled, so the engine no longer holds this result: its replay, tradebook and exports need it run again.</span>
+                  {canRun && <button type="button" className="qlink" onClick={() => runNow()}>{stale ? 'Run with the new settings' : 'Run it again'}</button>}
+                </div>
+              )}
               {stale && (
                 <div className="stale" role="status">
                   <span>These results are from earlier settings.</span>
-                  {busy ? <span>Running the new settings…</span> : canRun ? <button type="button" className="qlink" onClick={() => runNow()}>Run with the new settings</button> : <span>The new settings cannot run yet; see the panel.</span>}
+                  {busy ? <span>Running the new settings.</span> : canRun ? <button type="button" className="qlink" onClick={() => runNow()}>Run with the new settings</button> : <span>The new settings cannot run yet; see the panel.</span>}
                 </div>
               )}
               {saveOpen && (

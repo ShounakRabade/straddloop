@@ -107,6 +107,11 @@ full-width results area. Source: `app/lab/lab.css`, components in `components/la
   evidence*, out-of-sample cobalt, robust green) with its held-out test in a tinted column; then the checks as
   figures, the compare table and the ranked table. Curves shade training, validation and held-out test as
   bands; comparison lines differ by dash as well as colour.
+- **Run progress** says what the engine reports, never an estimate: the Run button and the status pill carry the
+  short form (Downloading 3/40, Unpacking 12/82, Session 120/244, Booking ledger), the empty state and the strip
+  above a result the long form with a bar (determinate only when there is a count). While a run works, a red
+  outlined **Cancel** takes the Optimise button's place. A result left on screen by a cancelled run is marked in a
+  marker-yellow note with the way back (run it again).
 - **Figures.** Mono, tabular. Green and red are for P&L only; a zero is never red. A figure the engine did
   not produce is an em dash with the reason beside it, never an estimate. Estimated figures carry an
   `EST.` tag.

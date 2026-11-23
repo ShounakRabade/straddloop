@@ -73,18 +73,23 @@ export async function datasetBounds(underlying: string, flag: ExpiryFlag): Promi
   return { ...boundsOf(a.days, st), days: a.days.length };
 }
 
-/** Downloads day files, a few at a time. Calls onProgress after each one. */
-export async function download(paths: string[], onProgress: (done: number) => void): Promise<{ path: string; buf: ArrayBuffer }[]> {
+/** Downloads day files, a few at a time. Calls onProgress after each one, and opts.onFile with each file as it arrives.
+ *  opts.signal.aborted stops it before the next file (an error with code CANCELLED). */
+export async function download(paths: string[], onProgress: (done: number) => void,
+  opts: { signal?: { aborted: boolean }; onFile?: (f: { path: string; buf: ArrayBuffer }) => void } = {}): Promise<{ path: string; buf: ArrayBuffer }[]> {
   const sb = supabase();
   if (!sb) throw new Error('Supabase is not configured on this site.');
   const out: { path: string; buf: ArrayBuffer }[] = [];
   let next = 0, done = 0;
   async function lane() {
     while (next < paths.length) {
+      if (opts.signal?.aborted) throw Object.assign(new Error('cancelled'), { code: 'CANCELLED' });
       const path = paths[next++];
       const { data, error } = await sb!.storage.from('market-data').download(path);
       if (error || !data) throw new Error(`Could not download ${path}: ${error?.message ?? 'no data'}`);
-      out.push({ path, buf: await data.arrayBuffer() });
+      const f = { path, buf: await data.arrayBuffer() };
+      out.push(f);
+      opts.onFile?.(f);
       onProgress(++done);
     }
   }

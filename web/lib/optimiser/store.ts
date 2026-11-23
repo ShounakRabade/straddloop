@@ -35,8 +35,9 @@ export interface StudyData {
   label: string; from: string | null; to: string | null; sessions: number;
   /** identifies the exact sessions (the Lab's range key, or the synthetic settings) */
   key: string;
-  /** day files in date order (real data) */
+  /** day files in date order (real data), and the sha256 the inventory lists for each (null when unknown) */
   paths?: string[];
+  sha256?: (string | null)[];
   synthetic?: { days: number; seed: number; iv: number };
   lotSize: number;
 }

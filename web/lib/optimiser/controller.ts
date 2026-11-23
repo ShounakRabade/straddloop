@@ -12,7 +12,7 @@ import type { CandRecord, Store, StudyConfig, StudyRecord, Summary } from './sto
 import type { Params } from '../types';
 
 export interface InitReq {
-  days: { path: string; buf: ArrayBuffer }[] | null;
+  days: { path: string; buf: ArrayBuffer; sha256?: string | null }[] | null;
   synthetic: { days: number; seed: number; iv: number } | null;
   lotSize: number;
   plan: { split: StudyConfig['split']; folds: number; wfMode: StudyConfig['wfMode'] };

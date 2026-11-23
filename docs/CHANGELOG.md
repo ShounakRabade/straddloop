@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased: run reliability and speed
+
+* **Progress you can trust, and Cancel.** A run says what it is doing, with counts from the engine: downloading
+  (and how many came from this browser), unpacking and checking day files n of N, simulating session n of N,
+  booking the ledger. Cancel sits where Optimise is while a run works (and in the phone's bottom bar): it stops a
+  download before the next file, or ends the engine mid-run and starts a fresh one. A result already on screen stays,
+  marked as needing a re-run before its replay, tradebook and exports work again.
+* **Day files are kept in this browser** (IndexedDB, by path and sha256), so a stored day is downloaded once: a
+  reload, a cancel or an optimiser study reads it from here.
+* **Every day file is checked** against the sha256 the inventory lists for it before it is used. A file that does not
+  match is refused by name, nothing runs, and the next run downloads only that file again. The assumptions panel
+  says how many files were checked.
+* **Memory and speed.** A decoded real session takes 0.65 MB instead of 1.59 MB (missing minutes are now empty array
+  slots, so prices stay unboxed) and decodes in 2.0 ms instead of 4.4 ms; the Lab worker keeps decoded sessions
+  (up to 600) instead of rebuilding them every run, and the optimiser fits more workers in the same memory. On all
+  307 stored days, every strategy and every builder template gives the same fingerprint as before
+  (`scripts/bench.mts` now prints decode time, memory and run hashes).
+* **Checks that stop a run instead of a quiet wrong figure:** the legs of a position fill at one bar; every leg fills
+  once in and once out on the same contract, across the sessions it is carried through; the ledger refuses a leg
+  sent twice; and a real-data request without its day files is refused (the optimiser's worker could previously fall
+  back to the synthetic model there).
+* Fixed: after cancelling a run, the earlier result was relabelled as the result of the cancelled settings.
+
 ## Unreleased: the optimiser
 
 * **Optimise**, beside Run: searches ranges of a strategy's settings on the data the Lab has chosen (real or

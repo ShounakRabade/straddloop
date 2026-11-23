@@ -1,7 +1,7 @@
 # Engine interfaces (v1)
 
 The contract between the research engine and everything built on it (Lab UI, analytics, reports).
-Status: **v1, 23 Nov 2026**, matches the code on `feat/strategy-builder` (v1 gained optional fields only; older specs run unchanged). Fields marked *(planned)* are agreed but
+Status: **v1, 24 Nov 2026**, matches the code on `fix/run-reliability` (v1 gained optional fields only; older specs run unchanged). Fields marked *(planned)* are agreed but
 not in code yet; everything else is what the code produces. Change this file in the same PR as any change to a
 shape.
 
@@ -225,11 +225,37 @@ The worker message keeps its existing shape. The leg engine is `params.strategy 
 
 ```ts
 // main thread -> worker
-{ id, params: { strategy: 'legs', spec: StrategySpec, ...AccountParams }, days?: DayRef[], range?: DateRange }
+{ id, params: { strategy: 'legs', spec: StrategySpec, ...AccountParams }, days?: DayRef[] }
+type DayRef = { path: string; buf?: ArrayBuffer; sha256?: string | null }   // buf only for days the worker does not hold
 // worker -> main thread
-{ id, progress: { phase: 'decode' | 'simulate' | 'ledger'; done: number; total: number } }   // (planned)
-{ id, ok: true, result: RunResult, ms } | { id, ok: false, error, gates: Gate[] | null }
+{ id, progress: { phase: 'decode' | 'simulate'; done: number; total: number } | { phase: 'ledger' } }
+{ id, ok: true, result: RunResult, ms, evicted: string[] }                   // evicted: `${path}|${lot}` no longer held
+{ id, ok: false, error, gates: Gate[] | null, code: 'MISSING' | 'CHECKSUM' | null, paths: string[] | null }
 ```
+
+**Days the worker holds.** A day file is unpacked, checked against `sha256` (the inventory's hash of the JSON
+before gzip; `dayfile.unpack`) and decoded once per lot size; the decoded session is kept, the file is not. After a
+run, sessions beyond 600 are dropped least-recently-used first (never those of the run just made) and listed in
+`evicted`, so the page sends them again when needed (`useLab.holds`). A day the worker does not hold and was not
+sent fails the run with `MISSING`; a file that does not match its hash fails it with `CHECKSUM` and the file's path,
+before anything is simulated. A request whose params name real dates (`data_from`, `range_key`) but carries no days
+is refused: the synthetic model never stands in for missing data.
+
+**Progress and cancel.** `compute.run(params, sessions, { tick(i, n), phase('ledger') })`: every engine calls `tick`
+before each session (`engine.setTick` for the published engines, `opts.tick` for `legs.run`); the worker posts it at
+most every 80 ms. The engines are synchronous, so a run is cancelled by ending the worker (`useLab.cancel`): the page
+starts a new one, sends every day again on the next run (from the browser's day-file cache, `lib/dayCache.ts`, keyed
+by path and sha256), and marks a result still on screen as `detached` (its replay and exports need a re-run).
+
+**Decoded sessions in memory.** A minute with no price is an empty array slot (it reads as `undefined`), never a stored
+`null`, so arrays of prices stay unboxed doubles: 0.65 MB a real session instead of 1.59 MB. Engines test prices with
+`== null`, which covers both. `mergeSessions` never changes its inputs (the worker reuses them).
+
+**Checks that stop a run** (`internal: …`, never a quiet figure): the leg engine's `checkFills` (the legs of a
+position fill at its bar; each leg fills once to open with its own action and once to close with the opposite; a leg
+keeps side, strike and expiry while held, across sessions too); the ledger refuses a second opening fill for an open
+leg and a fill after a leg closed (unless the ledger itself closed it, by liquidation or at the end of data); the
+worker requires one day outcome per session that ran.
 
 `RunResult` (in `web/lib/types.ts`) gains, for every strategy:
 

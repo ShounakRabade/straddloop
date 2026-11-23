@@ -459,6 +459,78 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
     await page.screenshot({ path: path.join(SHOTS, 'opt-phone.png'), fullPage: true });
     await ctx.close();
   });
+  if (DAYS) {
+    const isDone = (page) => page.waitForFunction(() => document.querySelector('.ws-status')?.getAttribute('data-state') === 'done', null, { timeout: 60000 });
+    await step('day files: each is checked against its sha256, kept in this browser, and not downloaded again after a reload', async () => {
+      const downloads = { count: 0 };
+      const { ctx, page } = await ctxFor(1366, 768, { mock: { downloads } });
+      await page.goto(BASE + '/lab?data=real');
+      await page.locator('.cal-grid').waitFor({ state: 'attached', timeout: 20000 });
+      await page.locator('.rail-foot .run-btn').click();
+      await isDone(page);
+      assert.strictEqual(downloads.count, 10, `the first run downloaded ${downloads.count} files`);
+      await page.locator('.ds-line .qlink', { hasText: 'Assumptions' }).click();
+      assert(/All 10 day files matched the SHA-256/.test(await page.locator('.ds-panel').innerText()), 'the check is stated');
+      const net = await page.locator('.exec .m--lead .m-v').innerText();
+      await page.reload();
+      await page.locator('.cal-grid').waitFor({ state: 'attached', timeout: 20000 });
+      await page.locator('.rail-foot .run-btn').click();
+      await isDone(page);
+      assert.strictEqual(downloads.count, 10, 'after a reload the files came from this browser, not the network');
+      assert.strictEqual(await page.locator('.exec .m--lead .m-v').innerText(), net, 'same files, same result');
+      await ctx.close();
+    });
+    await step('a damaged day file is refused by name, nothing runs, and the next run downloads only that file again', async () => {
+      const tamper = { date: '2025-10-08' }, downloads = { count: 0 };
+      const { ctx, page } = await ctxFor(1366, 768, { mock: { tamper, downloads } });
+      await page.goto(BASE + '/lab?data=real');
+      await page.locator('.cal-grid').waitFor({ state: 'attached', timeout: 20000 });
+      await page.locator('.rail-foot .run-btn').click();
+      const err = page.locator('.ws-empty[role="alert"]', { hasText: 'does not match its checksum' });
+      await err.waitFor({ timeout: 40000 });
+      const t = await err.innerText();
+      assert(/NIFTY\/WEEK\/2025-10-08\.json\.gz/.test(t) && /Nothing was run/.test(t), t);
+      assert.strictEqual(await page.locator('.exec').count(), 0, 'no figures from a refused run');
+      tamper.date = null;
+      await page.locator('.rail-foot .run-btn').click();
+      await isDone(page);
+      assert.strictEqual(downloads.count, 11, `only the refused file was fetched again (${downloads.count} downloads)`);
+      await page.screenshot({ path: path.join(SHOTS, 'state-checksum-retry.png') });
+      await ctx.close();
+    });
+    await step('a run says what it is doing and can be cancelled; the engine starts afresh and the next run is correct', async () => {
+      const { ctx, page } = await ctxFor(1366, 768);
+      await page.goto(BASE + '/lab?data=real');
+      await page.locator('.cal-grid').waitFor({ state: 'attached', timeout: 20000 });
+      const files = fs.readdirSync(DAYS).filter((f) => f.endsWith('.json.gz')).map((f) => path.join(DAYS, f));
+      await page.locator('input[type=file]').setInputFiles(files);
+      await page.locator('.rail-checks', { hasText: `${files.length} sessions will run` }).waitFor({ timeout: 30000 });
+      // cancel the first run while it unpacks: nothing is shown, the engine is ready again
+      await page.locator('.rail-foot .run-btn').click();
+      await page.locator('.ws-empty h2', { hasText: /Unpacking and checking day files: \d+ of \d+|Simulating session/ }).waitFor({ timeout: 20000 });
+      await page.screenshot({ path: path.join(SHOTS, 'state-run-progress.png') });
+      await page.locator('.rail-foot .opt-btn--cancel').click();
+      await page.locator('.ws-status[data-state="idle"]').waitFor({ timeout: 5000 });
+      assert.strictEqual(await page.locator('.exec').count(), 0, 'nothing from the cancelled run is shown');
+      // the next run sends every file to the fresh engine and gives the known figure (Strategy 01, every stored day)
+      await page.locator('.rail-foot .run-btn').click();
+      await isDone(page);
+      const net = await page.locator('.exec .m--lead .m-v').innerText();
+      assert(/50,611/.test(net), `Strategy 01 over ${files.length} stored days: ${net}`);
+      // a new lot size makes the engine decode every day again; cancelling that keeps the result, marked as needing a re-run
+      if (await page.locator('#sec-capital-h').getAttribute('aria-expanded') === 'false') await page.locator('#sec-capital-h').click();
+      await typeIn(page.locator('#lab-lot'), '75');
+      await page.locator('.rail-foot .run-btn').click();
+      await page.locator('.runbar', { hasText: /Unpacking|Simulating/ }).waitFor({ timeout: 20000 });
+      await page.locator('.rail-foot .opt-btn--cancel').click();
+      await page.locator('.stale', { hasText: 'The run after this one was cancelled' }).waitFor({ timeout: 5000 });
+      assert.strictEqual(await page.locator('.exec .m--lead .m-v').innerText(), net, 'the earlier result stays on screen');
+      assert(/These results are from earlier settings/.test(await page.locator('.ws-main').innerText()), 'and is still marked as from the settings it was run with');
+      assert(!/Run again/.test(await page.locator('.rail-foot .run-btn').innerText()), 'Run offers the new settings, not a repeat');
+      await page.screenshot({ path: path.join(SHOTS, 'state-run-cancelled.png') });
+      await ctx.close();
+    });
+  }
   await step('loading state: progress is shown while day files download', async () => {
     const { ctx, page } = await ctxFor(1366, 768);
     await ctx.route('https://stubproject.supabase.co/storage/**', async (route) => { await new Promise((r) => setTimeout(r, 1500)); await route.fallback(); });

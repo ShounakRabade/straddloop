@@ -22,12 +22,21 @@ async function init(req) {
   if (req.reuse && sessions) {
     // the same data again (a new study after a speed check): keep the decoded sessions, fix the new windows
   } else if (req.days) {
-    const docs = [];
-    for (const d of req.days) docs.push(await D.gunzipJSON(d.buf));
-    sessions = D.mergeSessions(docs.map((doc) => D.toSession(doc, { lotSize: Number(req.lotSize) || 0 })));
-  } else {
-    const sy = req.synthetic || {};
+    // one file at a time: unpacked, checked against its sha256 when known, decoded, and its JSON dropped
+    const list = [];
+    for (const d of req.days) {
+      let got;
+      try { got = await D.unpack(d.buf, d.sha256 || null); }
+      catch (err) { err.message = `Day file ${d.path}: ${err.message}. The study did not start.`; err.path = d.path; throw err; }
+      list.push(D.toSession(got.doc, { lotSize: Number(req.lotSize) || 0 }));
+    }
+    sessions = D.mergeSessions(list);
+  } else if (req.synthetic) {
+    const sy = req.synthetic;
     sessions = E.syntheticCalendar(Number(sy.days) || 120, { iv: Number(sy.iv) || 13 }, Number(sy.seed) || 1);
+  } else {
+    // never a silent stand-in for missing data
+    throw new Error('internal: the optimiser worker was given no sessions to study (no day files and no synthetic settings).');
   }
   if (!sessions.length) throw new Error('No sessions to study.');
   capital = Number(req.capital) || 500000;

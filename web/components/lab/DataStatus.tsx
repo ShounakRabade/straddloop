@@ -19,6 +19,10 @@ export function DataStatus({ real, local, r, slip, brokerage, seriesName, syn, f
   const rows: [string, string][] = real ? [
     ['Data', `Dhan 1-minute candles for NIFTY options (the nearest ${seriesName} expiry, ATM ± 10 strikes) and the NIFTY index${local ? `, from ${local} day files on this computer` : ', from the day files in your Supabase project'}.`],
     ['Fills', `Decided on completed bars, filled at the next bar’s open, ${slip}% and one tick against you. Stops trigger on the bar’s high (short) or low (long), fill at the worse of the stop and the open, and pay twice the slippage.`],
+    ['Day files', !d?.checksums ? 'Each file is checked against the SHA-256 the inventory lists for it before it is used; a file that does not match is refused.'
+      : d.checksums.checked === d.checksums.files ? `All ${d.checksums.files} day files matched the SHA-256 the inventory lists for them.`
+        : local ? `Files from this computer have no stored checksum, so ${d.checksums.files - d.checksums.checked} of ${d.checksums.files} were used unchecked.`
+          : `${d.checksums.checked} of ${d.checksums.files} day files were checked against their stored SHA-256; the rest have no checksum on record (or this page has no Web Crypto) and were used unchecked.`],
     ['Order book', 'No bid/ask history is stored, so a real order could fill worse, above all on a stop. Treat every result as optimistic.'],
     ['Expiry and lot size', d ? `Expiry dates ${/bhavcopy/i.test(d.expiry_source) ? 'from the NSE bhavcopy' : 'assumed from the weekday rule until checked against the NSE bhavcopy'}; lot size ${d.lot_sizes.join(' / ')}, ${/set/i.test(d.lot_source) ? 'set by you' : 'from the day files'}.` : 'From each day file: the NSE bhavcopy where imported, otherwise the weekday rule (assumed).'],
     ['Charges', `STT, exchange, SEBI, stamp duty and GST at the rates in force on each trade date; brokerage ₹${brokerage} an order. Cash settlement at expiry pays STT on in-the-money long options only.`],

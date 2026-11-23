@@ -297,6 +297,7 @@
           if (S.firstMargin == null && marginReq > 0) S.firstMargin = marginReq;
         } else {
           leg.exit_t = f.t; leg.exit_date = res.date; leg.exit_px = px; leg.exit_reason = f.reason; leg.exit_ch = ch; leg.intrabar_out = !!f.intrabar; leg.open = false; leg.last_px = px;
+          if (opt.forced) leg.forced = true;
           hedged = null;
           realised = leg.dir < 0 ? (leg.entry_px - px) * qty : (px - leg.entry_px) * qty;
           leg.gross = realised;
@@ -331,7 +332,13 @@
       const onFill = (f) => {
         if (skipped.has(f.legId)) return;
         const ex = legs.get(f.legId);
-        if (ex) { if (ex.open) finish(book(Object.assign({}, f, { qty0: f.qty }), ex.qty, f.px).leg); return; }
+        if (ex) {
+          // every engine leg fills once to open and once to close; anything else is an engine fault, never booked quietly
+          if (ex.open && dirOf(f.action) === ex.dir) throw new Error(`internal: ${res.date} leg ${f.legId}: a second ${f.action} for an open ${ex.dir < 0 ? 'short' : 'long'} leg (the same leg was sent twice)`);
+          if (ex.open) finish(book(Object.assign({}, f, { qty0: f.qty }), ex.qty, f.px).leg);
+          else if (!ex.forced) throw new Error(`internal: ${res.date} leg ${f.legId}: a fill arrived after the leg was closed (the same leg was sent twice)`);
+          return; // closed by the ledger itself (liquidation, or open at the end of data): the engine's own close is not booked
+        }
         const dir = dirOf(f.action), b = blocked(), avail = S.balance - b.m - b.h;
         const needFor = q => marginInc(dir, f.strike, q, f.side, f.spot) + (dir > 0 ? f.px * q : 0) + chargesFor(f.action, f.px, q, res.date, acct.brokerage_per_order).total;
         let qty = f.qty, need = needFor(qty), status = 'ok', shortfall = 0;

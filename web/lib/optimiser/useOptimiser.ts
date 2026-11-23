@@ -8,16 +8,17 @@ import { WorkerPool, configParams, runStudy, type InitReq, type Progress } from 
 import { browserStore, memoryStore, type CandRecord, type StudyConfig, type StudyData, type StudyRecord, type Store } from './store.ts';
 import { labStrategy, runParamsFor } from './space.ts';
 
-/** Memory one optimiser worker needs for the decoded sessions (measured: about 1.7 MB a session, real or synthetic). */
-export const MB_PER_SESSION = 1.7;
+/** Memory one optimiser worker needs per decoded session, rounded up from scripts/bench.mts: real 0.65 MB (prices kept
+ *  unboxed), synthetic 1.7 MB (every strike at every minute, with bid/ask). */
+export const mbPerSession = (real: boolean) => (real ? 0.7 : 1.7);
 /** What the optimiser workers together may hold by default. */
 export const MEMORY_BUDGET_MB = 600;
-export function autoWorkers(sessions: number, cores: number): number {
-  const byMem = Math.floor(MEMORY_BUDGET_MB / Math.max(1, sessions * MB_PER_SESSION));
+export function autoWorkers(sessions: number, cores: number, real: boolean): number {
+  const byMem = Math.floor(MEMORY_BUDGET_MB / Math.max(1, sessions * mbPerSession(real)));
   return Math.max(1, Math.min(4, Math.max(1, cores - 1), byMem));
 }
 
-export type LoadDays = (d: StudyData, onProgress: (done: number, total: number) => void) => Promise<{ path: string; buf: ArrayBuffer }[]>;
+export type LoadDays = (d: StudyData, onProgress: (done: number, total: number) => void) => Promise<{ path: string; buf: ArrayBuffer; sha256?: string | null }[]>;
 export type Opened = { study: StudyRecord; cands: CandRecord[] };
 
 export function useOptimiser(loadDays: LoadDays) {

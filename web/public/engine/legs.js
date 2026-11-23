@@ -521,7 +521,9 @@
     const charges = (action, px, qty, date, settle, dir) => (settle ? L.settlementCharges(dir, px, qty, ex.exercise_stt_pct) : L.chargesFor(action, px, qty, date, ex.brokerage_per_order));
     const anyOpen = p => { for (const l of p.legs) if (l.open) return true; return false; };
 
+    const tick = typeof opts.tick === 'function' ? opts.tick : null; // progress for the page: (index, count)
     for (let si = 0; si < sessions.length; si++) {
+      if (tick) tick(si, sessions.length);
       const s = sessions[si], prev = si > 0 ? sessions[si - 1] : null, lastSession = si === sessions.length - 1;
       const res = { date: s.date, symbol: s.symbol, source: s.source || '?', strategy: 'legs', status: 'no_entry', reason: null, flags: [], fills: [], mtm: [], events: [], legs: [],
         carry: [], lot_size: s.expiries[0] ? s.expiries[0].lot_size : null, exit_reason: '' };
@@ -827,6 +829,7 @@
       p.payoff = exps.size === 1 ? payoff(init.map(l => ({ action: l.action, right: l.right, strike: l.strike, qty: l.qty, entry_px: l.entry_px }))) : null;
     }
 
+    checkFills(results, positions);
     const records = positions.map(p => ({
       id: p.id, opened: p.opened, closed: p.closed, entry_premium: p.entry_premium, exit_reason: p.exit_reason || 'open', gross: p.gross, charges: p.charges, net: p.net, payoff: p.payoff,
       flags: [...p.flags],
@@ -837,6 +840,27 @@
     const seen = new Set();
     const gates = warnings.filter(g => { const k = g.code + g.message; if (seen.has(k)) return false; seen.add(k); return true; });
     return { results, positions: records, gates, config_hash, spec, caps };
+  }
+
+  /**
+   * What must hold for every run, checked after it (an engine fault stops the run with "internal:", never a quiet
+   * figure): legs placed together fill at the position's bar; every leg fills exactly once to open (its own action)
+   * and once to close (the opposite); and a leg keeps its contract (side, strike, expiry) from entry to exit, including
+   * across sessions it is carried through.
+   */
+  function checkFills(results, positions) {
+    const byLeg = new Map();
+    for (const r of results) for (const f of r.fills) { let a = byLeg.get(f.leg); if (!a) byLeg.set(f.leg, a = []); a.push(f); }
+    for (const p of positions) {
+      for (const l of p.legs) {
+        if (l.kind === 'initial' && (l.entry_date !== p.opened.date || l.entry_t !== p.opened.t)) throw new Error(`internal: ${p.id}: leg ${l.id} filled at ${l.entry_date} ${l.entry_t}, not with its position at ${p.opened.date} ${p.opened.t}`);
+        const fs = byLeg.get(l.id) || [];
+        if (fs.length !== 2) throw new Error(`internal: leg ${l.id} has ${fs.length} fill(s); every leg fills once to open and once to close`);
+        if (fs[0].action !== l.action || fs[1].action === l.action) throw new Error(`internal: leg ${l.id} fills ${fs[0].action} then ${fs[1].action}; it should open with ${l.action} and close with the opposite`);
+        for (const f of fs) if (f.side !== l.right || f.strike !== l.strike || f.expiry !== l.expiry) throw new Error(`internal: leg ${l.id} changed contract while held (${l.right} ${l.strike} ${l.expiry} → ${f.side} ${f.strike} ${f.expiry})`);
+      }
+    }
+    if (byLeg.size !== positions.reduce((n, p) => n + p.legs.length, 0)) throw new Error('internal: fills for legs that belong to no position');
   }
 
   function countWeekdaysBetween(a, b) {

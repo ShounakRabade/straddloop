@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import Study from '@/public/engine/study.js';
 import { HARD_CAP, axesFor, estimate, rangeValues, type AxisDef, type AxisPick, type Estimate, type Value } from '@/lib/optimiser/space';
-import { MB_PER_SESSION, autoWorkers, type Optimiser } from '@/lib/optimiser/useOptimiser';
+import { autoWorkers, mbPerSession, type Optimiser } from '@/lib/optimiser/useOptimiser';
 import type { StudyConfig, StudyData, StudyRecord } from '@/lib/optimiser/store';
 import { OBJECTIVES } from '@/lib/researchSpace';
 import type { LabStrategy } from '@/lib/strategyRegistry';
@@ -81,7 +81,7 @@ export function OptimiseView({ strategy, params, real, series, data, dates, slip
   const chosen: AxisPick[] = on.filter((x) => !x.error).map((x) => ({ key: x.a.key, values: x.values }));
   const sessions = data?.sessions ?? 0;
   const cores = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 2 : 2;
-  const workers = workersPick === 'auto' ? autoWorkers(sessions, cores) : workersPick;
+  const workers = workersPick === 'auto' ? autoWorkers(sessions, cores, real) : workersPick;
   const splitOk = split.train >= 30 && split.validation >= 10 && split.test >= 10 && split.train + split.validation + split.test === 100;
   const plan = useMemo(() => (sessions ? Study.studyPlan(dates && dates.length === sessions ? dates : Array.from({ length: sessions }, () => ''), { split: { train: split.train / 100, validation: split.validation / 100, test: split.test / 100 }, folds, wfMode }) : null),
     [sessions, dates, split, folds, wfMode]);
@@ -128,7 +128,7 @@ export function OptimiseView({ strategy, params, real, series, data, dates, slip
   }
 
   const setPick = (key: string, patch: Partial<PickState>) => setPicks((p) => ({ ...p, [key]: { ...p[key], ...patch } }));
-  const perWorker = sessions * MB_PER_SESSION;
+  const perWorker = sessions * mbPerSession(real);
 
   if (!strategy.optimise.ok) {
     return (
@@ -271,7 +271,7 @@ export function OptimiseView({ strategy, params, real, series, data, dates, slip
                     <input className="in" type="number" min={1} value={seed} onChange={(ev) => setSeed(Math.max(1, Math.round(Number(ev.target.value) || 1)))} /></label>
                   <label className="f"><span className="f-label">Workers</span>
                     <select className="in" value={String(workersPick)} onChange={(ev) => setWorkersPick(ev.target.value === 'auto' ? 'auto' : Number(ev.target.value))}>
-                      <option value="auto">Automatic ({autoWorkers(sessions, cores)})</option>{[1, 2, 3, 4].map((k) => <option key={k} value={k}>{k}</option>)}
+                      <option value="auto">Automatic ({autoWorkers(sessions, cores, real)})</option>{[1, 2, 3, 4].map((k) => <option key={k} value={k}>{k}</option>)}
                     </select></label>
                 </div>
                 <div className="f-meta">“Grid, else sample” runs the whole grid when it fits the limit, otherwise a seeded random sample of it. At most {n0(HARD_CAP)} configurations. Each worker holds its own copy of the sessions, about {Math.round(perWorker)} MB here; automatic keeps the workers under {600} MB together and leaves a core free.</div>

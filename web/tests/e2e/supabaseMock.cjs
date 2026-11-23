@@ -6,7 +6,7 @@
  * `MARKET_DAYS` mirrors the metadata of the rows stored in the project's market_days table when this file was
  * written (NIFTY weekly, 6–17 Oct 2025). Day-file bodies come from `dayDir` (written by `straddloop export-days`);
  * in tests these are synthetic sessions in the real file format, never real prices. */
-const fs = require('fs'), path = require('path');
+const fs = require('fs'), path = require('path'), zlib = require('zlib'), crypto = require('crypto');
 
 const REF = 'stubproject';
 const ASSUMED_EXPIRY = 'assumed: nearest weekly expiry weekday (Thu before 1 Sep 2025, Tue after), holidays not applied; bhavcopy not yet checked';
@@ -26,9 +26,16 @@ function b64url(o) { return Buffer.from(JSON.stringify(o)).toString('base64').re
  * opts.reader: false makes the account a non-reader. opts.statuses: rows for market_day_status (default: the
  * table does not exist, as in the live project today). opts.days: override MARKET_DAYS. opts.signedIn: false
  * leaves the visitor signed out.
+ * With opts.dayDir, each row's sha256 is the hash of that file's JSON (as `straddloop supabase-upload` writes it), so the
+ * Lab checks every download. opts.tamper: a date (or { date }, which can be changed while the page is open) whose file
+ * is served altered; its listed sha256 stays the original. opts.downloads: an object whose `count` grows with each file served.
  */
 async function mockSupabase(context, opts = {}) {
-  const days = opts.days || MARKET_DAYS;
+  const shaOf = (d) => {
+    const file = opts.dayDir && path.join(opts.dayDir, path.basename(d.path));
+    return file && fs.existsSync(file) ? crypto.createHash('sha256').update(zlib.gunzipSync(fs.readFileSync(file))).digest('hex') : null;
+  };
+  const days = (opts.days || MARKET_DAYS).map((d) => ({ ...d, sha256: d.sha256 ?? shaOf(d) }));
   const exp = Math.floor(Date.now() / 1000) + 3600 * 24;
   const user = { id: '00000000-0000-4000-8000-000000000001', aud: 'authenticated', role: 'authenticated', email: 'tester@example.test', app_metadata: {}, user_metadata: {}, created_at: '2025-01-01T00:00:00Z' };
   const token = `${b64url({ alg: 'HS256', typ: 'JWT' })}.${b64url({ sub: user.id, exp, role: 'authenticated', aud: 'authenticated' })}.sig`;
@@ -56,7 +63,18 @@ async function mockSupabase(context, opts = {}) {
     const m = p.match(/\/storage\/v1\/object\/(?:authenticated\/)?market-data\/(.+)$/);
     if (m && opts.dayDir) {
       const file = path.join(opts.dayDir, path.basename(decodeURIComponent(m[1])));
-      if (fs.existsSync(file)) return route.fulfill({ status: 200, contentType: 'application/gzip', headers: { 'access-control-allow-origin': '*' }, body: fs.readFileSync(file) });
+      if (fs.existsSync(file)) {
+        if (opts.downloads) opts.downloads.count = (opts.downloads.count || 0) + 1;
+        let body = fs.readFileSync(file);
+        const tamper = opts.tamper && (typeof opts.tamper === 'string' ? opts.tamper : opts.tamper.date);
+        if (tamper && path.basename(file).startsWith(tamper)) {
+          // one price changed by a paisa: still a valid day file, but not the one the inventory lists
+          const doc = JSON.parse(zlib.gunzipSync(body).toString('utf8'));
+          doc.series[0].c[5] = (doc.series[0].c[5] || 0) + 1;
+          body = zlib.gzipSync(Buffer.from(JSON.stringify(doc)));
+        }
+        return route.fulfill({ status: 200, contentType: 'application/gzip', headers: { 'access-control-allow-origin': '*' }, body });
+      }
       return json(route, { statusCode: '404', error: 'not_found', message: 'Object not found' }, 400);
     }
     return json(route, { message: `unmocked ${req.method()} ${p}` }, 404);

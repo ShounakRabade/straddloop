@@ -61,6 +61,7 @@
    *  and the CSVs all come from one source. Returns the extra fields for the result. */
   function withLedger(strategy, results, engineCfgHash, p, sessions, base, acctOver) {
     const info = { symbol: sessions && sessions[0] ? sessions[0].symbol : 'NIFTY', engine_cfg_hash: engineCfgHash, data_fingerprint: sessions ? fingerprint(sessions) : 'synthetic:' + L.hashStr(JSON.stringify([p.days, p.seed, p.iv])) };
+    if (hooks && hooks.phase) hooks.phase('ledger');
     const led = L.runLedger(results, acctOver || accountOf(p), info);
     const rep = led.report;
     rep.generated.run_hash = L.hashStr([engineCfgHash, rep.generated.account_hash, info.data_fingerprint, L.COST_TABLE_VERSION].join('|'));
@@ -271,7 +272,7 @@
   function legsStrategy(p, sessions) {
     const { spec, acct } = legsSetup(p);
     const sess = sessions || calendar(p);
-    const run = G.run(sess, spec, { L, caps: G.capsOf(sess) });
+    const run = G.run(sess, spec, { L, caps: G.capsOf(sess), tick: hooks && hooks.tick });
     last = { strategy: 'legs', results: run.results, cfg: { or_minutes: 30, candle_minutes: 5 }, positions: run.positions, sessions: sess, params: p };
     const exits = {};
     run.positions.forEach(x => { exits[x.exit_reason] = (exits[x.exit_reason] || 0) + 1; });
@@ -408,5 +409,17 @@
       account: { daily: last.ledger.daily, config: last.ledger.acct }, results: last.results.map(slimResult) };
   }
 
-  return { run: (p, sessions) => ({ straddle, orb, fourleg, ema_pullback: emaPullback, legs: legsStrategy })[p.strategy](p, sessions), scenarios, replay, exportCsv, inspect, dayOutcomes, evaluate, lastRun, ENGINE_EXTRAS };
+  /** One Lab run. hooks (optional, the Lab worker's progress): { tick(index, count) before each session is simulated,
+   *  phase('ledger') when the engine has finished and the account is being booked }. */
+  let hooks = null;
+  function run(p, sessions, h) {
+    const fn = ({ straddle, orb, fourleg, ema_pullback: emaPullback, legs: legsStrategy })[p.strategy];
+    if (!fn) throw new Error(`unknown strategy ${p.strategy}`);
+    hooks = h || null;
+    if (E.setTick) E.setTick(hooks && hooks.tick);
+    try { return fn(p, sessions); }
+    finally { hooks = null; if (E.setTick) E.setTick(null); }
+  }
+
+  return { run, scenarios, replay, exportCsv, inspect, dayOutcomes, evaluate, lastRun, ENGINE_EXTRAS };
 });
