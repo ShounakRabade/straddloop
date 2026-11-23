@@ -199,11 +199,13 @@
     const rows = (sess || []).map(s => s.vix && s.vix.c ? s.vix.c.filter(Number.isFinite) : []).filter(a => a.length);
     const n = rows.reduce((v, a) => v + a.length, 0);
     if (!n) return [['India VIX data', 'Unavailable for this date range. Load day files again after fetching India VIX 1-minute history.']];
-    const values = rows.flat(), first = rows.reduce((v, a) => v + a[0], 0) / rows.length;
+    let vmin = Infinity, vmax = -Infinity; // loop, not Math.min(...values): a long range has ~100k bars and overflows the stack
+    for (const a of rows) for (const x of a) { if (x < vmin) vmin = x; if (x > vmax) vmax = x; }
+    const first = rows.reduce((v, a) => v + a[0], 0) / rows.length;
     const last = rows.reduce((v, a) => v + a[a.length - 1], 0) / rows.length;
     return [['India VIX coverage', `${rows.length} of ${sess.length} sessions · ${n.toLocaleString()} one-minute bars`],
       ['India VIX open → close (session average)', `${first.toFixed(2)} → ${last.toFixed(2)} (${(last - first >= 0 ? '+' : '')}${(last - first).toFixed(2)})`],
-      ['India VIX observed range', `${Math.min(...values).toFixed(2)}–${Math.max(...values).toFixed(2)}`]];
+      ['India VIX observed range', `${vmin.toFixed(2)}–${vmax.toFixed(2)}`]];
   }
 
   function emaPullback(p, sessions) {
