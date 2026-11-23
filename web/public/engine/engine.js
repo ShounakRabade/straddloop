@@ -6,6 +6,11 @@
   else root.StraddleEngine = factory();
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
+  // min / max by loop. Math.min(...xs) passes every element as a call argument and overflows the call stack
+  // ("Maximum call stack size exceeded") once xs grows past roughly 100k items (a long range, many trades, many
+  // configurations). Same results as Math.min / Math.max, including NaN, empty input and signed zero.
+  function maxOf(a) { let m = -Infinity; for (let i = 0; i < a.length; i++) { const x = +a[i]; if (x !== x) return NaN; if (x > m || (x === 0 && m === 0 && 1 / x > 0)) m = x; } return m; }
+  function minOf(a) { let m = Infinity; for (let i = 0; i < a.length; i++) { const x = +a[i]; if (x !== x) return NaN; if (x < m || (x === 0 && m === 0 && 1 / x < 0)) m = x; } return m; }
 
   // ------------------------------------------------------------------ config
   const DEFAULTS = {
@@ -659,7 +664,7 @@
       profit_factor: losses.length && sum(losses) < 0 ? sum(wins) / -sum(losses) : null,
       win_rate: 100 * wins.length / n, avg_win: wins.length ? sum(wins) / wins.length : null,
       avg_loss: losses.length ? sum(losses) / losses.length : null,
-      largest_win: Math.max(...pnl), largest_loss: Math.min(...pnl),
+      largest_win: maxOf(pnl), largest_loss: minOf(pnl),
     });
     if (marginPerLot) m.return_on_margin_pct = 100 * sum(pnl) / (marginPerLot * lots);
     let cum = 0, peak = 0, dd = 0, streak = 0, maxStreak = 0;
@@ -679,8 +684,8 @@
     m.es5 = sum(s.slice(0, k)) / k;
     m.tail_sample_note = n >= 100 ? 'adequate' : `only ${n} traded sessions; 5% tail rests on ${k} observation(s), treat as indicative`;
     m.worst_5pct_days = traded.slice().sort((a, b) => a.net - b.net).slice(0, k).map(r => ({ date: r.date, net: r.net }));
-    m.max_intraday_adverse = Math.min(...traded.map(r => r.mae));
-    m.max_intraday_favourable = Math.max(...traded.map(r => r.mfe));
+    m.max_intraday_adverse = minOf(traded.map(r => r.mae));
+    m.max_intraday_favourable = maxOf(traded.map(r => r.mfe));
     m.pct_loss_sessions = 100 * losses.length / n;
     const grossProfit = sum(traded.filter(r => r.gross > 0).map(r => r.gross));
     m.costs_pct_of_gross_profit = grossProfit > 0 ? 100 * costs / grossProfit : null;
@@ -785,7 +790,7 @@
     const out = [];
     let oos = [];
     for (let j = 1; j < folds.length; j++) {
-      const train = [].concat(...folds.slice(0, j));
+      const train = folds.slice(0, j).flat();
       let best = null, bestScore = -Infinity;
       for (const g of grid) {
         const sc = S.run(train, S.make(Object.assign({}, base || {}, g))).metrics[score];
@@ -1471,7 +1476,7 @@
       '. Index points and premium points differ by the option\'s delta, plus IV and time-decay effects.']);
     out.push(['What closed the trade', tr.map(t => `${t.exit_reason.replace('_', ' ')} at ${fmtHM(t.exit_t)}`).join('; ') + '.']);
     out.push(['Costs and slippage', `Charges ${rs(r.costs)} on gross ${rs(r.gross)} → net ${rs(r.net)}. Fills ${cfg.use_quotes ? 'at bid/ask where present, else ' : ''}${cfg.slip_pct}% + ${cfg.slip_ticks} tick; structural exits ×${cfg.stop_slip_mult}.`]);
-    const worst = Math.min(...tr.map(t => t.mae));
+    const worst = minOf(tr.map(t => t.mae));
     out.push(['Adverse movement allowed', `Worst open loss inside a trade ${rs(worst)}. ${(r.reversals || []).length ? '' : 'No reversal candle formed, so no structural level existed for part of the trade. '}The structural exit is not a loss limit; the most a long option can lose is its premium plus costs.`]);
     out.push(['Flags', r.flags.length ? r.flags.join(', ') : 'none']);
     out.push(['Next experiment', tr.some(t => t.exit_reason === 'structural' && t.net < 0) ? 'Test the reversal definition and a 5-point buffer: opposite-colour candles are common, so the default may exit on noise.'

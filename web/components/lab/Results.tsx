@@ -10,6 +10,7 @@ import { GLOSSARY } from '@/lib/glossary';
 import { narrate, byExit } from '@/lib/narrative';
 import { outcomeLabel, outcomesOf } from '@/lib/outcomes';
 import { rollingSharpe, rollingVol } from '@/lib/rolling';
+import { maxOf, minOf } from '@/lib/stats';
 import { holdMinutes } from '@/lib/tradeFilter';
 import type { DateRange } from '@/lib/dateRange';
 import type { ExportKind, LedgerRow, Report, RunResult } from '@/lib/types';
@@ -26,7 +27,7 @@ export type LabApi = {
   replay: (date: string) => Promise<import('@/lib/types').Replay | null>;
 };
 export type Baseline = { label: string; dataKey: string; strategy: string; m: Record<string, number | null> };
-export type TabId = 'overview' | 'capital' | 'charts' | 'trades' | 'sessions' | 'replay' | 'research' | 'diagnostics' | 'ledger';
+export type TabId = 'overview' | 'capital' | 'charts' | 'trades' | 'sessions' | 'rolling' | 'replay' | 'research' | 'diagnostics' | 'ledger';
 
 const tone = (v: number | null | undefined) => (v == null ? '' : v > 0 ? 'gain' : v < 0 ? 'loss' : '');
 const n = (v: unknown) => (typeof v === 'number' && isFinite(v) ? v : null);
@@ -36,10 +37,12 @@ const NA = <span className="na">—</span>;
 /** Headline numbers used by the executive header and by baseline comparison. */
 export function headline(r: RunResult): Record<string, number | null> {
   const rep = r.account?.report;
+  // a leg-engine run counts positions (the legs opened together); the ledger report counts closed legs
+  const pos = r.unit === 'position';
   return {
     net: r.net, pct_initial: rep ? n(rep.returns.pct_initial) : null, cagr: rep ? n(rep.returns.cagr_pct) : null,
-    trades: rep ? n(rep.performance.closed_positions) : r.traded, win_rate: rep ? n(rep.performance.win_rate_pct) : r.winRate,
-    pf: rep ? n(rep.performance.profit_factor) : r.profitFactor, max_dd: rep ? n(rep.risk.max_drawdown) : Math.abs(r.maxDD),
+    trades: rep && !pos ? n(rep.performance.closed_positions) : r.traded, win_rate: rep && !pos ? n(rep.performance.win_rate_pct) : r.winRate,
+    pf: rep && !pos ? n(rep.performance.profit_factor) : r.profitFactor, max_dd: rep ? n(rep.risk.max_drawdown) : Math.abs(r.maxDD),
     sharpe: rep ? n(rep.risk.sharpe) : null, sortino: rep ? n(rep.risk.sortino) : null, rpm: rep ? n(rep.returns.pct_peak_margin) : null,
   };
 }
@@ -62,7 +65,7 @@ function Metric({ k, label, tip, def, value, sub, cls = '', lead = false, delta,
 function Spark({ r }: { r: RunResult }) {
   const pts = r.curve.map((p) => p.v);
   if (pts.length < 2) return null;
-  const all = [0, ...pts], lo = Math.min(...all), hi = Math.max(...all), span = hi - lo || 1;
+  const lo = Math.min(0, minOf(pts)), hi = Math.max(0, maxOf(pts)), span = hi - lo || 1;
   const W = 240, H = 44, x = (i: number) => (i / (pts.length - 1)) * W, y = (v: number) => H - 2 - ((v - lo) / span) * (H - 4);
   return (
     <svg className="spark" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true">
@@ -97,7 +100,7 @@ export function Exec({ r, busy, baseline }: { r: RunResult; busy: boolean; basel
       </div>
     );
   }
-  const pf = rep.performance, rk = rep.risk, rt = rep.returns, c = rep.capital;
+  const pf = rep.performance, rk = rep.risk, rt = rep.returns, c = rep.capital, pos = r.unit === 'position';
   const dd = n(rk.max_drawdown) ?? 0;
   return (
     <div className="exec" data-busy={busy} aria-label="Headline results">
@@ -115,12 +118,12 @@ export function Exec({ r, busy, baseline }: { r: RunResult; busy: boolean; basel
       <Metric k="pct_initial" label="Net return" tip={GLOSSARY.net_return} def={rep.defs.ret_initial} value={signedPct(h.pct_initial)} cls={tone(h.pct_initial)}
         sub={`of ${inr(Number(c.initial_capital))} capital`} delta={deltaOf('pct_initial', h.pct_initial, baseline, (v) => signedPct(v))} />
       <Metric k="cagr" label="CAGR" tip={GLOSSARY.cagr} def={rep.defs.cagr} value={h.cagr == null ? NA : signedPct(h.cagr)} cls={tone(h.cagr)} sub={h.cagr == null ? (rt.cagr_note ?? 'not shown') : 'annualised'} />
-      <Metric k="trades" label="Trades" tip={GLOSSARY.trades} value={h.trades ?? NA}
-        sub={r.unit === 'day' ? `${r.traded} traded day${r.traded === 1 ? '' : 's'} of ${r.sessions}` : `in ${r.sessions} sessions`} delta={deltaOf('trades', h.trades, baseline, (v) => String(v))} />
+      <Metric k="trades" label={pos ? 'Positions' : 'Trades'} tip={pos ? 'Positions opened and closed: the legs opened together count once. The tradebook lists every leg on its own row.' : GLOSSARY.trades} value={h.trades ?? NA}
+        sub={r.unit === 'day' ? `${r.traded} traded day${r.traded === 1 ? '' : 's'} of ${r.sessions}` : pos ? `${pf.closed_positions} legs in ${r.sessions} sessions` : `in ${r.sessions} sessions`} delta={deltaOf('trades', h.trades, baseline, (v) => String(v))} />
       <Metric k="win_rate" label="Win rate" tip={GLOSSARY.win_rate} def={rep.defs.win_rate} value={h.win_rate == null ? NA : pct2(h.win_rate, 1)}
-        sub={`${pf.wins} of ${pf.closed_positions} legs${r.unit === 'day' && r.traded ? ` · ${r.winRate.toFixed(0)}% of days` : ''}`} delta={deltaOf('win_rate', h.win_rate, baseline, (v) => `${v.toFixed(1)}%`)} />
+        sub={pos ? `${Math.round(r.winRate * r.traded / 100)} of ${r.traded} positions · ${n(pf.win_rate_pct)?.toFixed(0) ?? '–'}% of legs` : `${pf.wins} of ${pf.closed_positions} legs${r.unit === 'day' && r.traded ? ` · ${r.winRate.toFixed(0)}% of days` : ''}`} delta={deltaOf('win_rate', h.win_rate, baseline, (v) => `${v.toFixed(1)}%`)} />
       <Metric k="pf" label="Profit factor" tip={GLOSSARY.profit_factor} def={rep.defs.profit_factor} value={h.pf == null ? NA : num2(h.pf)}
-        sub={h.pf == null ? (Number(pf.losses) === 0 ? 'no losing legs' : 'not defined') : 'winners ÷ losers'} delta={deltaOf('pf', h.pf, baseline, (v) => v.toFixed(2))} />
+        sub={pos ? (h.pf == null ? 'no losing positions, or none closed' : 'winning ÷ losing positions') : h.pf == null ? (Number(pf.losses) === 0 ? 'no losing legs' : 'not defined') : 'winners ÷ losers'} delta={deltaOf('pf', h.pf, baseline, (v) => v.toFixed(2))} />
       <Metric k="max_dd" label="Max drawdown" tip={GLOSSARY.max_dd} def={rep.defs.max_dd} value={dd > 0 ? `−${inr(dd)}` : '₹0'} cls={dd > 0 ? 'loss' : ''}
         sub={dd > 0 ? `${pct2(n(rk.max_drawdown_pct))} of peak balance` : 'never below a previous peak'} delta={deltaOf('max_dd', h.max_dd, baseline, (v) => inr(v))} />
       <Metric k="sharpe" label="Sharpe" tip={GLOSSARY.sharpe} def={rep.defs.sharpe} value={h.sharpe == null ? NA : num2(h.sharpe)} sub={rk.sharpe_note ? String(rk.sharpe_note) : `${rk.sessions_in_ratio} daily returns`} delta={deltaOf('sharpe', h.sharpe, baseline, (v) => v.toFixed(2))} />
@@ -436,13 +439,15 @@ function LedgerPanel({ r, lab, stamp }: { r: RunResult; lab: LabApi; stamp: stri
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'overview', label: 'Overview' }, { id: 'capital', label: 'Capital & margin' }, { id: 'charts', label: 'Charts' }, { id: 'trades', label: 'Trades' },
-  { id: 'sessions', label: 'Sessions' }, { id: 'replay', label: 'Replay' }, { id: 'research', label: 'Research' }, { id: 'diagnostics', label: 'Diagnostics' }, { id: 'ledger', label: 'Ledger & export' },
+  { id: 'sessions', label: 'Sessions' }, { id: 'rolling', label: 'Rolling' }, { id: 'replay', label: 'Replay' }, { id: 'research', label: 'Research' }, { id: 'diagnostics', label: 'Diagnostics' }, { id: 'ledger', label: 'Ledger & export' },
 ];
 
-export function ResultTabs({ r, lab, range, real, slip, tab, setTab, research }: {
+export function ResultTabs({ r, lab, range, real, slip, tab, setTab, research, rolling, rollingCount }: {
   r: RunResult; lab: LabApi; range: DateRange | null; real: boolean; slip: number | undefined; tab: TabId; setTab: (t: TabId) => void;
   /** The research panel. It mounts the first time its tab opens and then stays mounted, so a running study survives a tab change. */
   research?: React.ReactNode;
+  /** Rolling-window results (real data, when the mode is on); the tab is shown only then. */
+  rolling?: React.ReactNode; rollingCount?: number;
 }) {
   const [researchSeen, setResearchSeen] = useState(false);
   useEffect(() => { if (tab === 'research') setResearchSeen(true); }, [tab]);
@@ -460,9 +465,9 @@ export function ResultTabs({ r, lab, range, real, slip, tab, setTab, research }:
     return () => { live = false; };
   }, [rev, inspect, r.account]);
   const replayable = r.strategy !== 'fourleg' && r.curve.length > 0;
-  const tabs = TABS.filter((t) => (t.id !== 'replay' || replayable) && (t.id !== 'research' || !!research));
+  const tabs = TABS.filter((t) => (t.id !== 'replay' || replayable) && (t.id !== 'research' || !!research) && (t.id !== 'rolling' || rolling != null));
   if (!tabs.some((t) => t.id === tab)) tab = 'overview';
-  const counts: Partial<Record<TabId, number>> = { trades: trades?.length, sessions: r.days?.length };
+  const counts: Partial<Record<TabId, number>> = { trades: trades?.length, sessions: r.days?.length, rolling: rollingCount };
   const m = r.account?.report.margin;
   const alarms = m ? [
     Number(m.rejected_trades) ? `${m.rejected_trades} trade${Number(m.rejected_trades) === 1 ? ' was' : 's were'} rejected for insufficient margin and ${Number(m.rejected_trades) === 1 ? 'is' : 'are'} not in the P&L.` : null,
@@ -507,6 +512,7 @@ export function ResultTabs({ r, lab, range, real, slip, tab, setTab, research }:
         </div>
       )}
       {tab === 'sessions' && <SessionsPanel r={r} range={real ? range : null} onReplay={replay} />}
+      {tab === 'rolling' && rolling != null && <div className="panel" role="tabpanel" id="panel-rolling" aria-labelledby="tab-rolling">{rolling}</div>}
       {tab === 'replay' && replayable && (
         <div className="panel" role="tabpanel" id="panel-replay" aria-labelledby="tab-replay">
           <ReplayPanel key={`${rev}-${replayDate ?? ''}`} r={r} load={lab.replay} initialDate={replayDate} bare />

@@ -5,6 +5,7 @@
  */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
 import { shortDate } from '@/lib/format';
+import { maxOf, minOf } from '@/lib/stats';
 
 function useWidth<T extends HTMLElement>() {
   const ref = useRef<T>(null);
@@ -39,6 +40,10 @@ export const compactInr = (v: number) => {
 };
 
 type Pt = { d: string; v: number | null };
+/** A shaded stretch of the x axis (point indices, end exclusive), e.g. the training, validation and test windows. */
+export type Band = { from: number; to: number; label: string; tone: 'a' | 'b' | 'c' };
+/** Further lines drawn over the first, for comparing up to four series on the same dates. */
+export type Extra = { points: Pt[]; label: string };
 
 function useCursor(n: number) {
   const [i, setI] = useState<number | null>(null);
@@ -53,18 +58,19 @@ function useCursor(n: number) {
   return { i, setI, onKey };
 }
 
-/** A time series. `area`: 'signed' shades above zero green and below red; 'neutral' shades under the line. */
-export function LinePlot({ points, second, area = 'signed', fmt, axisFmt = compactInr, label, height = 280, secondLabel, zero = true }: {
+/** A time series. `area`: 'signed' shades above zero green and below red; 'neutral' shades under the line.
+ *  `bands` shade stretches of the x axis; `extra` adds lines (each its own style, named in the readout). */
+export function LinePlot({ points, second, area = 'signed', fmt, axisFmt = compactInr, label, height = 280, secondLabel, zero = true, bands, extra, firstLabel }: {
   points: Pt[]; second?: Pt[]; area?: 'signed' | 'neutral' | 'none'; fmt: (v: number) => string; axisFmt?: (v: number) => string;
-  label: string; height?: number; secondLabel?: string; zero?: boolean;
+  label: string; height?: number; secondLabel?: string; zero?: boolean; bands?: Band[]; extra?: Extra[]; firstLabel?: string;
 }) {
   const [ref, W] = useWidth<HTMLDivElement>();
   const { i, setI, onKey } = useCursor(points.length);
   const H = height, L = 58, R = 12, T = 12, B = 26;
   const geo = useMemo(() => {
-    const vals = [...points, ...(second ?? [])].map((p) => p.v).filter((v): v is number => v != null && isFinite(v));
+    const vals = [...points, ...(second ?? []), ...(extra ?? []).flatMap((e) => e.points)].map((p) => p.v).filter((v): v is number => v != null && isFinite(v));
     if (!vals.length) return null;
-    let lo = Math.min(...vals), hi = Math.max(...vals);
+    let lo = minOf(vals), hi = maxOf(vals);
     if (zero) { lo = Math.min(0, lo); hi = Math.max(0, hi); }
     if (hi === lo) { hi += 1; lo -= 1; }
     const pad = (hi - lo) * 0.06; lo -= pad; hi += pad;
@@ -75,8 +81,10 @@ export function LinePlot({ points, second, area = 'signed', fmt, axisFmt = compa
     const firstK = points.findIndex((p) => p.v != null), lastK = points.length - 1 - [...points].reverse().findIndex((p) => p.v != null);
     const base = zero ? y(0) : H - B;
     const shade = firstK >= 0 ? `${line}L${x(lastK).toFixed(1)} ${base.toFixed(1)}L${x(firstK).toFixed(1)} ${base.toFixed(1)}Z` : '';
-    return { lo, hi, x, y, line, shade, line2: second ? path(second) : '', ticks: niceTicks(lo, hi, H > 220 ? 4 : 3) };
-  }, [points, second, W, H, zero]);
+    const step = points.length > 1 ? (W - L - R) / (points.length - 1) : 0;
+    const bx = (k: number) => Math.max(L, Math.min(W - R, x(k) - step / 2));
+    return { lo, hi, x, y, line, shade, line2: second ? path(second) : '', lines: (extra ?? []).map((e) => path(e.points)), bands: (bands ?? []).filter((b) => b.to > b.from).map((b) => ({ ...b, x0: bx(b.from), x1: bx(b.to) })), ticks: niceTicks(lo, hi, H > 220 ? 4 : 3) };
+  }, [points, second, extra, bands, W, H, zero]);
   if (!geo) return <div className="plot-empty">No values to plot.</div>;
   const cur = i != null ? points[i] : null, cur2 = i != null && second ? second[i] : null;
   const move = (e: PointerEvent<SVGSVGElement>) => {
@@ -89,7 +97,8 @@ export function LinePlot({ points, second, area = 'signed', fmt, axisFmt = compa
   return (
     <div className="plot" ref={ref}>
       <div className="plot-read" aria-live="polite">
-        {cur ? <><span>{shortDate(cur.d)}</span><b>{cur.v == null ? 'n/a' : fmt(cur.v)}</b>{cur2 && secondLabel && <span>{secondLabel} {cur2.v == null ? 'n/a' : fmt(cur2.v)}</span>}</>
+        {cur ? <><span>{shortDate(cur.d)}</span>{firstLabel && <span className="pl-k" data-k="0">{firstLabel}</span>}<b>{cur.v == null ? 'n/a' : fmt(cur.v)}</b>{cur2 && secondLabel && <span>{secondLabel} {cur2.v == null ? 'n/a' : fmt(cur2.v)}</span>}
+          {(extra ?? []).map((e, k) => { const v = e.points[i!]?.v; return <span key={k} className="pl-k" data-k={k + 1}>{e.label} <b>{v == null ? 'n/a' : fmt(v)}</b></span>; })}</>
           : <span>Hover or focus the chart and use ← → to read each point</span>}
       </div>
       <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={label} tabIndex={0} onKeyDown={onKey}
@@ -98,6 +107,7 @@ export function LinePlot({ points, second, area = 'signed', fmt, axisFmt = compa
           <clipPath id={`${clipId}u`}><rect x={L} y={0} width={W - L - R} height={zero ? geo.y(0) : H} /></clipPath>
           <clipPath id={`${clipId}d`}><rect x={L} y={zero ? geo.y(0) : H} width={W - L - R} height={H} /></clipPath>
         </defs>
+        {geo.bands.map((b) => <g key={b.label}><rect className="band" data-tone={b.tone} x={b.x0} width={Math.max(0, b.x1 - b.x0)} y={T} height={H - T - B} /><text className="band-t" x={b.x0 + 4} y={T + 11}>{b.label}</text></g>)}
         {geo.ticks.map((v) => (
           <g key={v}><line className="gd" x1={L} x2={W - R} y1={geo.y(v)} y2={geo.y(v)} /><text x={L - 8} y={geo.y(v) + 4} textAnchor="end">{axisFmt(v)}</text></g>
         ))}
@@ -106,6 +116,7 @@ export function LinePlot({ points, second, area = 'signed', fmt, axisFmt = compa
         {zero && <line className="ax" x1={L} x2={W - R} y1={geo.y(0)} y2={geo.y(0)} />}
         {geo.line2 && <path className="ln2" d={geo.line2} />}
         <path className="ln" d={geo.line} />
+        {geo.lines.map((d, k) => <path key={k} className="lnx" data-k={k + 1} d={d} />)}
         {xl.map((k, n) => <text key={k} x={geo.x(k)} y={H - 6} textAnchor={n === 0 ? 'start' : n === xl.length - 1 ? 'end' : 'middle'}>{shortDate(points[k].d)}</text>)}
         {cur && cur.v != null && (
           <g><line className="cur" x1={geo.x(i!)} x2={geo.x(i!)} y1={T} y2={H - B} /><circle className="dot2" cx={geo.x(i!)} cy={geo.y(cur.v)} r={4} /></g>
@@ -161,7 +172,7 @@ export function Histogram({ values, bins = 16, fmt, label, unit, height = 240, s
   const [ref, W] = useWidth<HTMLDivElement>();
   const data = useMemo(() => {
     if (!values.length) return null;
-    let lo = Math.min(...values), hi = Math.max(...values);
+    let lo = minOf(values), hi = maxOf(values);
     if (hi === lo) { lo -= 1; hi += 1; }
     const k = Math.max(4, Math.min(bins, Math.ceil(Math.sqrt(values.length) * 2)));
     const w = (hi - lo) / k;

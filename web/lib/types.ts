@@ -1,6 +1,8 @@
-import type { Gate, PositionRecord, StrategySpec } from './legs/types';
+import type { Gate, PositionRecord, StrategySpec, TemplateId } from './legs/types';
 
 export type StrategySlug = 'straddle' | 'orb' | 'fourleg' | 'ema_pullback';
+/** Any strategy the Lab can run: a published rule set, or a strategy-builder structure (lib/strategyRegistry.ts). */
+export type LabSlug = StrategySlug | TemplateId;
 export type Focus = 'index' | 'stocks' | 'exploring';
 export type Params = Record<string, string | number | boolean>;
 
@@ -55,6 +57,16 @@ export interface DayOutcome {
   net: number;
 }
 
+/** One window of a rolling-window run (analytics.runRolling): its own backtest, started flat with the full capital. */
+export interface RollingRow {
+  from: string; to: string; sessions: number; traded: number; net: number | null; win_rate: number | null; pf: number | null;
+  max_dd: number | null; sharpe: number | null; best: number | null; worst: number | null;
+}
+export interface RollingResult {
+  rows: RollingRow[];
+  summary: { windows: number; with_trades: number; positive: number; median: number | null; mean: number | null; sd: number | null; best: number | null; worst: number | null };
+}
+
 export interface ReplayLeg { side: string; strike: number; kind: string; entry_t: number; entry_px: number; exit_t: number | null; exit_px: number | null; exit_reason: string | null; stop: number | null; net: number }
 export interface Replay {
   strategy: 'straddle' | 'orb' | 'ema_pullback' | 'legs'; date: string; status: string; reason: string | null; net?: number; gross?: number; costs?: number;
@@ -71,7 +83,7 @@ export interface RunSummary {
 
 export interface SavedRun {
   id: string;
-  strategy: StrategySlug;
+  strategy: LabSlug;
   params: Params;
   summary: RunSummary;
   note: string;

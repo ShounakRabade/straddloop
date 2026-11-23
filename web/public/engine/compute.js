@@ -9,6 +9,11 @@
     if (!cache.has(key)) { if (cache.size > 6) cache.delete(cache.keys().next().value); cache.set(key, make()); }
     return cache.get(key);
   }
+  // min / max by loop. Math.min(...xs) passes every element as a call argument and overflows the call stack
+  // ("Maximum call stack size exceeded") once xs grows past roughly 100k items (a long range, many trades, many
+  // configurations). Same results as Math.min / Math.max, including NaN, empty input and signed zero.
+  function maxOf(a) { let m = -Infinity; for (let i = 0; i < a.length; i++) { const x = +a[i]; if (x !== x) return NaN; if (x > m || (x === 0 && m === 0 && 1 / x > 0)) m = x; } return m; }
+  function minOf(a) { let m = Infinity; for (let i = 0; i < a.length; i++) { const x = +a[i]; if (x !== x) return NaN; if (x < m || (x === 0 && m === 0 && 1 / x < 0)) m = x; } return m; }
   const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v : d);
 
   function calendar(p) {
@@ -72,7 +77,7 @@
       const n = dayNets.length, mean = n ? sumN(dayNets) / n : 0, sd = sdOf(dayNets);
       Object.assign(head, { traded: n, avg: mean, ci: n > 1 ? [mean - t95(n - 1) * sd / Math.sqrt(n), mean + t95(n - 1) * sd / Math.sqrt(n)] : null, t: n > 1 && sd > 0 ? mean / (sd / Math.sqrt(n)) : null,
         winRate: n ? 100 * wins.length / n : 0, profitFactor: loss.length && sumN(loss) < 0 ? sumN(wins) / -sumN(loss) : null,
-        worst: n ? Math.min(...dayNets) : 0, best: n ? Math.max(...dayNets) : 0 });
+        worst: n ? minOf(dayNets) : 0, best: n ? maxOf(dayNets) : 0 });
     } else {
       Object.assign(head, { traded: perf.closed_positions, avg: perf.expectancy || 0, ci: perf.ci95_trade || null, t: perf.t_stat_trade,
         winRate: perf.win_rate_pct || 0, profitFactor: perf.profit_factor, worst: perf.largest_loss || 0, best: perf.largest_win || 0 });
@@ -199,7 +204,7 @@
     const rows = (sess || []).map(s => s.vix && s.vix.c ? s.vix.c.filter(Number.isFinite) : []).filter(a => a.length);
     const n = rows.reduce((v, a) => v + a.length, 0);
     if (!n) return [['India VIX data', 'Unavailable for this date range. Load day files again after fetching India VIX 1-minute history.']];
-    let vmin = Infinity, vmax = -Infinity; // loop, not Math.min(...values): a long range has ~100k bars and overflows the stack
+    let vmin = Infinity, vmax = -Infinity; // a loop over every bar: a long range has ~100k bars (see maxOf)
     for (const a of rows) for (const x of a) { if (x < vmin) vmin = x; if (x > vmax) vmax = x; }
     const first = rows.reduce((v, a) => v + a[0], 0) / rows.length;
     const last = rows.reduce((v, a) => v + a[a.length - 1], 0) / rows.length;
@@ -247,21 +252,27 @@
     };
   }
 
+  /** The spec and account a leg-engine run uses. The account owns brokerage, so the engine's cost lines use the same
+   *  figure and the two reconcile; the leg engine's margin defaults to the hedged estimate. */
+  function legsSetup(p) {
+    if (!G) throw new Error('The leg engine is not loaded.');
+    const raw = typeof p.spec === 'string' ? JSON.parse(p.spec) : p.spec;
+    if (!raw) throw new Error('No strategy spec was given.');
+    const spec = G.normalize(raw);
+    if (p.brokerage_per_order !== undefined && p.brokerage_per_order !== '') spec.execution.brokerage_per_order = Number(p.brokerage_per_order);
+    const acct = Object.assign({ margin_model: 'hedged' }, accountOf(p), { brokerage_per_order: spec.execution.brokerage_per_order, exercise_stt_pct: spec.execution.exercise_stt_pct });
+    return { spec, acct };
+  }
+
   /**
    * The leg engine (docs/ENGINE_INTERFACES.md): any strategy as a StrategySpec in p.spec. Headline figures are per
    * POSITION (the legs opened together), taken from the ledger's tradebook grouped by position.
    */
   function legsStrategy(p, sessions) {
-    if (!G) throw new Error('The leg engine is not loaded.');
-    const raw = typeof p.spec === 'string' ? JSON.parse(p.spec) : p.spec;
-    if (!raw) throw new Error('No strategy spec was given.');
-    const spec = G.normalize(raw);
-    // The account owns brokerage; the engine's cost lines must use the same figure so the two reconcile.
-    if (p.brokerage_per_order !== undefined && p.brokerage_per_order !== '') spec.execution.brokerage_per_order = Number(p.brokerage_per_order);
+    const { spec, acct } = legsSetup(p);
     const sess = sessions || calendar(p);
     const run = G.run(sess, spec, { L, caps: G.capsOf(sess) });
     last = { strategy: 'legs', results: run.results, cfg: { or_minutes: 30, candle_minutes: 5 }, positions: run.positions, sessions: sess, params: p };
-    const acct = Object.assign({ margin_model: 'hedged' }, accountOf(p), { brokerage_per_order: spec.execution.brokerage_per_order, exercise_stt_pct: spec.execution.exercise_stt_pct });
     const exits = {};
     run.positions.forEach(x => { exits[x.exit_reason] = (exits[x.exit_reason] || 0) + 1; });
     const head = withLedger('legs', run.results, run.config_hash, p, sessions, {
@@ -277,7 +288,7 @@
     Object.assign(head, {
       traded: n, avg: mean, ci: n > 1 ? [mean - 1.96 * sd / Math.sqrt(n), mean + 1.96 * sd / Math.sqrt(n)] : [mean, mean], t: n > 1 && sd > 0 ? mean / (sd / Math.sqrt(n)) : null,
       winRate: n ? 100 * wins.length / n : 0, profitFactor: loss.length && sumN(loss) < 0 ? sumN(wins) / -sumN(loss) : null,
-      worst: n ? Math.min(...nets) : 0, best: n ? Math.max(...nets) : 0,
+      worst: n ? minOf(nets) : 0, best: n ? maxOf(nets) : 0,
       extra: [
         ['Days with no entry', `${run.results.filter(r => ['no_entry', 'filtered', 'excluded'].includes(r.status)).length} of ${run.results.length}`],
         ['Average winning position', wins.length ? sumN(wins) / wins.length : 0], ['Average losing position', loss.length ? sumN(loss) / loss.length : 0],
@@ -355,12 +366,19 @@
    */
   function evaluate(p, sessions) {
     const sess = sessions || calendar(p);
-    let results;
+    let results, acct = accountOf(p);
     if (p.strategy === 'straddle') results = E.runBacktest(sess, straddleCfg(p)).results;
     else if (p.strategy === 'orb') results = E.ORB.run(sess, orbCfg(p)).results;
     else if (p.strategy === 'ema_pullback') results = E.EMA.run(sess, E.EMA.makeConfig(Object.assign({}, common(p), extras('ema_pullback', p)))).results;
-    else throw new Error('Research tools cover the intraday NIFTY strategies only.');
-    const led = L.runLedger(results, accountOf(p), { symbol: sess[0] ? sess[0].symbol : 'NIFTY' });
+    else if (p.strategy === 'legs') {
+      // lean: the same fills and ledger as a Lab run, without the replay text (tests/legs.test.mts checks they agree).
+      // cost_mult is applied after booking (stressDaily below); the engine's own net-basis exits are not re-decided.
+      const su = legsSetup(p);
+      acct = su.acct;
+      results = G.run(sess, su.spec, { L, caps: G.capsOf(sess), lean: true }).results;
+    }
+    else throw new Error('Research tools cover the intraday NIFTY strategies and the strategy builder only.');
+    const led = L.runLedger(results, acct, { symbol: sess[0] ? sess[0].symbol : 'NIFTY' });
     const mult = Number(p.cost_mult) || 1;
     const daily = mult !== 1 ? stressDaily(led, mult) : led.daily;
     return { account: { daily, config: led.acct }, results: results.map(slimResult) };

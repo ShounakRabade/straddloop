@@ -9,7 +9,8 @@ import type { LedgerRow, RunResult } from './types';
 export interface NarrativeBlock { id: 'happened' | 'worked' | 'hurt' | 'capital' | 'reliable' | 'next'; title: string; lines: string[] }
 
 const p1 = (v: number | null | undefined) => (v == null || !isFinite(v) ? null : `${v.toFixed(1)}%`);
-const unitOf = (r: RunResult, n: number) => (r.unit === 'day' ? (n === 1 ? 'traded day' : 'traded days') : r.unit === 'trade' ? (n === 1 ? 'trade' : 'trades') : n === 1 ? 'month' : 'months');
+const unitOf = (r: RunResult, n: number) => (r.unit === 'day' ? (n === 1 ? 'traded day' : 'traded days') : r.unit === 'trade' ? (n === 1 ? 'trade' : 'trades')
+  : r.unit === 'position' ? (n === 1 ? 'position' : 'positions') : n === 1 ? 'month' : 'months');
 
 /** Net P&L and count of closed positions by exit reason, from the tradebook (or the engine's exit counts). */
 export function byExit(trades: LedgerRow[] | null): { reason: string; n: number; net: number }[] {
@@ -32,7 +33,7 @@ export function narrate(r: RunResult, ctx: { trades?: LedgerRow[] | null; slipPc
   // What happened?
   const happened: string[] = [];
   const sign = r.net > 0 ? 'a profit' : r.net < 0 ? 'a loss' : 'no change';
-  happened.push(`On ${sample}${period ? `, ${period}` : ''}, the rules ran over ${r.sessions} ${sessionsWord}, traded on ${r.traded} ${unitOf(r, r.traded)} and ended with ${sign} of ${inr(Math.abs(r.net))} after ${inr(r.costs)} of charges.`);
+  happened.push(`On ${sample}${period ? `, ${period}` : ''}, the rules ran over ${r.sessions} ${sessionsWord}, ${r.unit === 'position' ? 'opened' : 'traded on'} ${r.traded} ${unitOf(r, r.traded)} and ended with ${sign} of ${inr(Math.abs(r.net))} after ${inr(r.costs)} of charges.`);
   if (rep && rep.returns.pct_initial != null) happened.push(`That is ${rep.returns.pct_initial >= 0 ? '+' : '−'}${Math.abs(rep.returns.pct_initial).toFixed(2)}% of the ${inr(Number(rep.capital.initial_capital))} starting capital.`);
   if (!r.traded) happened.push('The entry rule never passed, so there is nothing to analyse. Loosen the entry condition or lengthen the period.');
   out.push({ id: 'happened', title: 'What happened?', lines: happened });

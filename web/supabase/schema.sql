@@ -12,12 +12,17 @@ create table if not exists public.profiles (
 create table if not exists public.runs (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
-  strategy text not null check (strategy in ('straddle', 'orb', 'fourleg')),
+  strategy text not null check (strategy ~ '^[a-z][a-z0-9_]{1,40}$'),
   params jsonb not null default '{}'::jsonb,
   summary jsonb not null default '{}'::jsonb,
   note text not null default '' check (char_length(note) <= 280),
   created_at timestamptz not null default now()
 );
+
+-- A saved run can come from any Lab strategy: the published rule sets and the strategy builder's structures
+-- (lib/strategyRegistry.ts). Tables made before that allowed only three names; re-running this file widens them.
+alter table public.runs drop constraint if exists runs_strategy_check;
+alter table public.runs add constraint runs_strategy_check check (strategy ~ '^[a-z][a-z0-9_]{1,40}$');
 
 create index if not exists runs_user_created_idx on public.runs (user_id, created_at desc);
 

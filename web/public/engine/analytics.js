@@ -17,6 +17,11 @@
   else root.StraddloopAnalytics = factory();
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
+  // min / max by loop. Math.min(...xs) passes every element as a call argument and overflows the call stack
+  // ("Maximum call stack size exceeded") once xs grows past roughly 100k items (a long range, many trades, many
+  // configurations). Same results as Math.min / Math.max, including NaN, empty input and signed zero.
+  function maxOf(a) { let m = -Infinity; for (let i = 0; i < a.length; i++) { const x = +a[i]; if (x !== x) return NaN; if (x > m || (x === 0 && m === 0 && 1 / x > 0)) m = x; } return m; }
+  function minOf(a) { let m = Infinity; for (let i = 0; i < a.length; i++) { const x = +a[i]; if (x !== x) return NaN; if (x < m || (x === 0 && m === 0 && 1 / x < 0)) m = x; } return m; }
 
   const VERSION = 'analytics-2026-11-19';
 
@@ -177,7 +182,7 @@
     const ms = mean(perSession), ss = sdev(perSession);
     const down = perSession.length ? Math.sqrt(sum(perSession.map((x) => Math.min(0, x) ** 2)) / perSession.length) : null;
     const utils = tr.map((d) => d.util_pct).filter((x) => typeof x === 'number' && isFinite(x));
-    const peakMargin = Math.max(0, ...el.map((d) => d.peak_margin || 0));
+    const peakMargin = Math.max(0, maxOf(el.map((d) => d.peak_margin || 0)));
     const net = sum(nets);
     const span = el.length ? (Date.parse(el[el.length - 1].date) - Date.parse(el[0].date)) / 86400000 + 1 : 0;
     const exits = {};
@@ -193,14 +198,14 @@
       pf: gl > 0 ? gw / gl : (gw > 0 ? null : null), pf_note: gl > 0 ? null : (gw > 0 ? 'no losing day' : 'no winning day'),
       avg_win: wins.length ? gw / wins.length : null, avg_loss: losses.length ? -gl / losses.length : null,
       payoff: wins.length && losses.length && gl > 0 ? (gw / wins.length) / (gl / losses.length) : null,
-      best: nets.length ? Math.max(...nets) : null, worst: nets.length ? Math.min(...nets) : null,
+      best: nets.length ? maxOf(nets) : null, worst: nets.length ? minOf(nets) : null,
       max_dd: dd.dd, max_dd_pct: 100 * dd.dd / cap,
       dd_from: dd.from >= 0 ? el[dd.from].date : (dd.to >= 0 ? el[0].date : null), dd_to: dd.to >= 0 ? el[dd.to].date : null,
       sharpe: ss && ss > 0 ? (ms / ss) * Math.sqrt(252) : null,
       sortino: down && down > 0 ? (ms / down) * Math.sqrt(252) : null,
       sr_period: ss && ss > 0 ? ms / ss : null,
       calmar: dd.dd < 0 ? net / -dd.dd : null,
-      util_avg: utils.length ? mean(utils) : null, util_peak: utils.length ? Math.max(...utils) : null,
+      util_avg: utils.length ? mean(utils) : null, util_peak: utils.length ? maxOf(utils) : null,
       peak_margin: peakMargin || null, rom: peakMargin > 0 ? 100 * net / peakMargin : null,
       ret_pct: 100 * net / cap,
       cagr: span >= 365 ? 100 * (Math.pow(Math.max(1e-9, 1 + net / cap), 365 / span) - 1) : null,
@@ -668,8 +673,8 @@
         is: isPerf[best], oos: perf(evals[best].days.slice(te[0], te[1]), o), orig_oos: perf(evals[0].days.slice(te[0], te[1]), o) });
     }
     const used = folds.filter((f) => f.chosen != null);
-    const oosDays = [].concat(...used.map((f) => evals[f.chosen].days.slice(f.test_idx[0], f.test_idx[1])));
-    const origDays = [].concat(...used.map((f) => evals[0].days.slice(f.test_idx[0], f.test_idx[1])));
+    const oosDays = used.map((f) => evals[f.chosen].days.slice(f.test_idx[0], f.test_idx[1])).flat();
+    const origDays = used.map((f) => evals[0].days.slice(f.test_idx[0], f.test_idx[1])).flat();
     const oos = perf(oosDays, o), orig = perf(origDays, o);
     const isMean = used.length ? mean(used.map((f) => f.is.per_session || 0)) : null;
     const chosenSet = new Set(used.map((f) => f.chosen));
@@ -852,7 +857,7 @@
       const nb = rows.filter((r) => r.step !== 0);
       const retain = selScoreIS > 0 && isFinite(selScoreIS) && nb.length ? mean(nb.map((r) => clamp((isFinite(r.score) ? r.score : 0) / selScoreIS, 0, 1))) : null;
       sens.push({ key: ax.key, label: ax.label, rows, retention: retain, positive_neighbours: nb.filter((r) => r.p.net > 0).length, neighbours: nb.length,
-        cliff: nb.length ? Math.min(...nb.map((r) => r.p.net)) : null });
+        cliff: nb.length ? minOf(nb.map((r) => r.p.net)) : null });
     }
     // cost stress on the user's settings and the selected settings
     const stress = {};
@@ -876,6 +881,39 @@
       selected_days: evals[sel].days, original_days: evals[0].days,
       ms: hooks.now() - t0,
     };
+  }
+
+  // ================================================================== rolling windows
+  /**
+   * The same rules over successive windows of history (the Lab's rolling-window mode). spec: { params, windows:
+   * [{ from, to }], options: { capital } }. runner(params, from, to) returns a run in fromRun's shape for the stored
+   * sessions in [from, to], or null when there are none. Every window is its own backtest: it starts flat, with the
+   * full capital, so windows can be compared with each other but not added up.
+   */
+  async function runRolling(spec, runner, hooks) {
+    hooks = Object.assign({ progress: () => {}, cancelled: () => false, yieldFn: () => Promise.resolve() }, hooks || {});
+    const o = Object.assign({ capital: 500000 }, spec.options || {});
+    const ws = spec.windows || [], rows = [];
+    for (let i = 0; i < ws.length; i++) {
+      if (hooks.cancelled()) throw new Error('cancelled');
+      const w = ws[i];
+      hooks.progress({ done: i, total: ws.length, stage: 'rolling', label: `${w.from} to ${w.to}` });
+      const run = runner(spec.params, w.from, w.to);
+      if (!run) { rows.push({ from: w.from, to: w.to, sessions: 0, traded: 0, net: null, win_rate: null, pf: null, max_dd: null, sharpe: null, best: null, worst: null }); continue; }
+      const p = perf(run.days, o);
+      // sessions = every stored day the window handed to the engine (as the Lab counts them), excluded ones included
+      rows.push({ from: w.from, to: w.to, sessions: p.sessions + p.excluded, traded: p.traded, net: p.net, win_rate: p.win_rate, pf: p.pf, max_dd: p.max_dd, sharpe: p.sharpe, best: p.best, worst: p.worst });
+      await hooks.yieldFn();
+    }
+    hooks.progress({ done: ws.length, total: ws.length, stage: 'rolling' });
+    const nets = rows.filter((r) => r.net != null && r.traded > 0).map((r) => r.net);
+    const sorted = nets.slice().sort((a, b) => a - b);
+    const summary = {
+      windows: rows.length, with_trades: nets.length, positive: nets.filter((x) => x > 0).length,
+      median: sorted.length ? quantile(sorted, 0.5) : null, mean: nets.length ? mean(nets) : null, sd: nets.length > 1 ? sdev(nets) : null,
+      best: nets.length ? maxOf(nets) : null, worst: nets.length ? minOf(nets) : null,
+    };
+    return { rows, summary };
   }
 
   /** Robustness check of ONE configuration (no search): consistency across chronological thirds,
@@ -1245,5 +1283,5 @@
   return { VERSION, rng, mean, sdev, quantile, t95, ciMean, normCdf, normInv, moments, spearman, sampleClass, maxDrawdown, fromRun, perf,
     UNAVAILABLE_INPUTS, sessionFeatures, DEFAULT_THRESHOLDS, classify, regimeBreakdown, kmeansRegimes, hmmVol, volForecast, entryFilterModel,
     PARAM_SPACE, axisValues, planCandidates, OBJECTIVES, scoreAll, splitChrono, walkForward, pbo, deflatedSharpe, monteCarlo, costScenarios,
-    runOptimisation, runCheck, diagnostics, WEIGHTS, robustness, explain, analyseRun, fmtInr };
+    runOptimisation, runCheck, runRolling, diagnostics, WEIGHTS, robustness, explain, analyseRun, fmtInr };
 });

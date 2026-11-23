@@ -47,9 +47,31 @@ async function research(id, req) {
   return Object.assign(out, { check, study, params: snap.params, data_key: snap.params && JSON.stringify([snap.params.data_from, snap.params.data_to, snap.sessions.length]) });
 }
 
+/**
+ * Rolling windows over the sessions of the latest real run: { id, rolling: { params, days, windows } }, where days
+ * are the run's DayRefs (already decoded here) and windows [{ from, to }]. Each window is its own backtest through
+ * compute.evaluate, which leaves the latest run, its replay and its exports untouched. Posts { id, progress }
+ * between windows; { cancelResearch: id } stops it before the next one.
+ */
+async function rolling(id, req) {
+  const sessions = await sessionsFor(req.days, req.params);
+  const runner = (p, from, to) => {
+    const sub = sessions.filter((s) => s.date >= from && s.date <= to);
+    return sub.length ? A.fromRun(compute.evaluate(p, sub)) : null;
+  };
+  const hooks = { progress: (pr) => self.postMessage({ id, progress: pr }), cancelled: () => cancelled.has(id), yieldFn: () => new Promise((r) => setTimeout(r, 0)) };
+  return A.runRolling({ params: req.params, windows: req.windows || [], options: { capital: Number(req.params.capital) || 500000 } }, runner, hooks);
+}
+
 self.onmessage = async (ev) => {
   const { id, params, days, replay, exportKind, inspect } = ev.data;
   if (ev.data.cancelResearch != null) { cancelled.add(ev.data.cancelResearch); return; }
+  if (ev.data.rolling) {
+    try { self.postMessage({ id, ok: true, rolling: await rolling(id, ev.data.rolling) }); }
+    catch (err) { self.postMessage({ id, ok: false, error: String((err && err.message) || err) }); }
+    finally { cancelled.delete(id); }
+    return;
+  }
   if (ev.data.research) {
     try { self.postMessage({ id, ok: true, research: await research(id, ev.data.research) }); }
     catch (err) { self.postMessage({ id, ok: false, error: String((err && err.message) || err) }); }

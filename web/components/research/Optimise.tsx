@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react';
 import { Button } from '@/components/ui';
 import type { Axis, ResearchProgress, Study } from '@/lib/research';
 import { CUSTOM_KEYS, ENGINE_DEFAULTS, OBJECTIVES, PARAM_SPACE, choiceLabel, parseValues } from '@/lib/researchSpace';
+import { maxOf, minOf } from '@/lib/stats';
 import type { Params } from '@/lib/types';
 import { Histogram, Money, PERF_HEAD, PerfCells, Scroll, money, nm, pc } from './bits';
 import { McView } from './Views';
@@ -128,7 +129,7 @@ const fmtParam = (k: string, v: unknown) => `${PARAM_SPACE.straddle.concat(PARAM
 export function StudyView({ s, onLoad, stale, loaded = false }: { s: Study; onLoad: (changes: Record<string, unknown>) => void; stale: boolean; loaded?: boolean }) {
   const sel = s.selected, org = s.original;
   const changes = Object.fromEntries(sel.changed.map((c) => [c.key, c.to]));
-  const nets = s.distribution.map((d) => d.net), lo = Math.min(...nets), hi = Math.max(...nets);
+  const nets = s.distribution.map((d) => d.net), lo = minOf(nets), hi = maxOf(nets);
   const bins = 20, counts = new Array(bins).fill(0);
   nets.forEach((v) => { counts[Math.min(bins - 1, Math.floor(hi > lo ? ((v - lo) / (hi - lo)) * bins : 0))]++; });
   const wf = s.walk_forward;
@@ -180,7 +181,7 @@ export function StudyView({ s, onLoad, stale, loaded = false }: { s: Study; onLo
       {nets.length > 2 && <div className="stack" style={{ ['--gap' as string]: '6px' }}>
         <h3 className="rep-h">Spread of all tested configurations (whole-range net)</h3>
         <Histogram counts={counts} lo={lo} hi={hi} mark={org.full.net} label="net per configuration; line = your settings" />
-        <p className="small muted">{nets.filter((v) => v > 0).length} of {nets.length} configurations made money over the whole range. Worst drawdown among them: {money(Math.min(...s.distribution.map((d) => d.dd)))}.</p>
+        <p className="small muted">{nets.filter((v) => v > 0).length} of {nets.length} configurations made money over the whole range. Worst drawdown among them: {money(minOf(s.distribution.map((d) => d.dd)))}.</p>
       </div>}
 
       <div className="stack" style={{ ['--gap' as string]: '8px' }}>

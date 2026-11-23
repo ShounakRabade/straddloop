@@ -2,9 +2,12 @@
  *   NEXT_PUBLIC_SUPABASE_URL=https://stubproject.supabase.co NEXT_PUBLIC_SUPABASE_ANON_KEY=sb_publishable_test npm run build
  *   npx next start -p 3123 &
  *   BASE=http://localhost:3123 DAYFILES=/path/to/dayfiles/NIFTY/WEEK SHOTS=/tmp/lab-ui node tests/e2e/lab-ui.cjs
+ * Uses `playwright` (npx playwright install chromium), or `playwright-core` with an installed browser: PW_CHANNEL=msedge.
  * Supabase is replaced by tests/e2e/supabaseMock.cjs (10 stored NIFTY weekly days, 6–17 Oct 2025; status table absent).
  * Day files in DAYFILES must be synthetic sessions in the real file format. */
-const { chromium } = require('playwright');
+let pw;
+try { pw = require('playwright'); } catch { pw = require('playwright-core'); }
+const { chromium } = pw;
 const fs = require('fs'), path = require('path'), assert = require('assert');
 const { mockSupabase } = require('./supabaseMock.cjs');
 const BASE = process.env.BASE || 'http://localhost:3123', SHOTS = process.env.SHOTS || '/tmp/lab-ui', DAYS = process.env.DAYFILES;
@@ -30,10 +33,12 @@ const layout = (page) => page.evaluate(() => {
 const narrow = (w) => w < 1024;
 const openSettings = async (page, w) => { if (narrow(w)) { await page.locator('.ws-mbar .qbtn').click(); await page.locator('.ws[data-drawer="open"]').waitFor(); await page.waitForTimeout(300); } };
 const closeSettings = async (page, w) => { if (narrow(w)) { await page.keyboard.press('Escape'); await page.locator('.ws[data-drawer="closed"]').waitFor(); } };
+/** Types into a box the way a person does: scroll to it, click, replace its text. */
+const typeIn = async (loc, text) => { await loc.scrollIntoViewIfNeeded(); await loc.click(); await loc.fill(text); };
 const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rail-foot .run-btn');
 
 (async () => {
-  const browser = await chromium.launch();
+  const browser = await chromium.launch(process.env.PW_CHANNEL ? { channel: process.env.PW_CHANNEL } : {});
   const errors = [];
   const ctxFor = async (w, h, opts = {}) => {
     const ctx = await browser.newContext({ viewport: { width: w, height: h }, reducedMotion: opts.reducedMotion });
@@ -101,7 +106,7 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
         await page.locator('.ws[data-drawer="closed"]').waitFor();
       } else {
         const before = (await page.locator('.ws-rail').boundingBox()).width;
-        assert(before >= 318 && before <= 382, `rail width ${before}px is outside 320–380`);
+        assert(before >= 334 && before <= 402, `rail width ${before}px is outside 336–400`);
         await page.locator('.rail-head .ib').click();
         await page.locator('.ws[data-rail="collapsed"]').waitFor();
         assert((await page.locator('.ws-rail').boundingBox()).width <= 60, 'collapsed rail is a thin spine');
@@ -162,12 +167,13 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
         await page.goto(BASE + '/lab?data=real');
         await page.locator('.cal-grid').waitFor({ state: 'attached', timeout: 20000 });
         await openSettings(page, w);
-        await page.locator('#sec-period').scrollIntoViewIfNeeded();
+        await page.locator('#sec-data').scrollIntoViewIfNeeded();
         const t = await page.locator('.rail-checks').innerText();
         assert(/10 sessions will run/.test(t), t);
         assert(/17 Oct 2025/.test(t), 'end is the latest stored day, from the data');
         assert(await page.locator('.cal-day[data-date="2025-10-06"][data-state="partial"]').count() === 1, '6 Oct marked partial');
-        assert(await page.locator('.cal-day[data-date="2025-10-02"][data-state="holiday"]').count() === 1, '2 Oct marked holiday');
+        // history starts on the first stored day (6 Oct): 2 Oct is outside it and cannot be picked
+        assert(await page.locator('.cal-day[data-date="2025-10-02"][data-state="outside"]:disabled').count() === 1, '2 Oct is outside the stored history');
         await page.screenshot({ path: path.join(SHOTS, `${name}-4-calendar.png`) });
       });
       await step(`${name}: presets, clicking two days and the keyboard all set the one date range`, async () => {
@@ -197,8 +203,46 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
         const l = await layout(page);
         assert(l.sideways <= 1, `sideways ${l.sideways}`);
       });
+      await step(`${name}: the range bar moves the window, cuts it at the stored history and says so; rolling windows run`, async () => {
+        const now = () => page.locator('.rb-now').innerText();
+        const chip = (t) => page.locator('.rb .rb-chip', { hasText: new RegExp(`^${t.replace('+', '\\+')}$`) });
+        assert(/6 Oct 2025 – 17 Oct 2025/.test(await now()) && /10 sessions/.test(await now()), await now());
+        // all stored history is selected: nothing before or after it
+        assert(await page.locator('.rb-step', { hasText: 'Previous' }).isDisabled() && await page.locator('.rb-step', { hasText: 'Next' }).isDisabled(), 'both moves disabled at the edges');
+        assert(/nothing is stored after 17 Oct 2025/.test(await page.locator('.rb-step', { hasText: 'Next' }).getAttribute('title')));
+        // the last 7 sessions (9–17 Oct, 9 days); the window before it runs into 6 Oct, the first stored day
+        await chip('7D').click();
+        assert(/9 Oct 2025 – 17 Oct 2025/.test(await now()), await now());
+        await page.locator('.rb-step', { hasText: 'Previous' }).click();
+        assert(/6 Oct 2025 – 8 Oct 2025/.test(await now()), await now());
+        assert(/Stored data starts on 6 Oct 2025: this window has 3 of the 9 days asked for/.test(await page.locator('.rb-note').innerText()));
+        // Next goes back to the 9-day window that was asked for, not a 3-day one
+        await page.locator('.rb-step', { hasText: 'Next' }).click();
+        assert(/9 Oct 2025 – 17 Oct 2025/.test(await now()), await now());
+        await chip('60D').click();
+        assert(/6 Oct 2025 – 17 Oct 2025/.test(await now()), '60 sessions: all 10 stored');
+        await page.locator('#rb-n').fill('5'); await page.locator('.rb-unit').selectOption('days'); await chip('Use').click();
+        assert(/13 Oct 2025 – 17 Oct 2025/.test(await now()), await now());
+        await chip('Max').click();
+        // rolling: 5-day windows every 5 days over 6–17 Oct: 6–10 and 11–15 Oct; 16–17 Oct are in no window
+        await page.locator('.rb-check input').check();
+        await page.locator('#rb-w').fill('5'); await page.locator('#rb-s').fill('5');
+        assert(/2 windows · the last 2 days are in no window/.test(await page.locator('.rb-plan').innerText()));
+        await closeSettings(page, w);
+        await runBtn(page, w).click();
+        await page.locator('#tab-rolling').click();
+        await page.locator('#panel-rolling table').waitFor({ timeout: 40000 });
+        const rows = await page.locator('#panel-rolling tbody tr').allInnerTexts();
+        assert.strictEqual(rows.length, 2);
+        assert(/6 Oct 2025 – 10 Oct 2025\s+5\b/.test(rows[0]) && /11 Oct 2025 – 15 Oct 2025\s+3\b/.test(rows[1]), rows.join(' / '));
+        const l = await layout(page);
+        assert(l.sideways <= 1, `sideways ${l.sideways}`);
+        await page.locator('.rb-check input').uncheck();
+        await page.locator('#tab-overview').click();
+      });
       await step(`${name}: changing a rule marks the result stale instead of silently re-running real data`, async () => {
         await openSettings(page, w);
+        if (await page.locator('#sec-risk-h').getAttribute('aria-expanded') === 'false') await page.locator('#sec-risk-h').click();
         const slider = page.locator('#straddle-sl_pct');
         await slider.scrollIntoViewIfNeeded();
         await slider.focus();
@@ -209,11 +253,11 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
         await page.locator('.stale', { hasText: 'earlier settings' }).waitFor({ state: 'detached', timeout: 30000 });
         assert(await page.locator('.exec .m-d').count() > 0, 'comparison with the default-rules baseline shown');
       });
-      await step(`${name}: the guided setup walks eight steps and can be left at any point`, async () => {
+      await step(`${name}: the guided setup walks seven steps and can be left at any point`, async () => {
         await openSettings(page, w);
         await page.locator('.rail-head button', { hasText: 'Guide me' }).click();
-        for (let i = 1; i < 8; i++) {
-          assert(new RegExp(`Step ${i} of 8`, 'i').test(await page.locator('.guide').innerText()));
+        for (let i = 1; i < 7; i++) {
+          assert(new RegExp(`Step ${i} of 7`, 'i').test(await page.locator('.guide').innerText()));
           await page.locator('.guide-nav button', { hasText: 'Next' }).click();
         }
         await page.locator('.guide-nav button', { hasText: 'Run now' }).waitFor();
@@ -225,6 +269,196 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
     }
   }
 
+  // ---- the configuration controls (Stage 2): time picker, stop/target levels, builder legs, layout at desktop widths
+  await step('time picker: typing, the interval list, the grain and the order of times are all enforced', async () => {
+    const { ctx, page } = await ctxFor(1440, 900);
+    await page.goto(BASE + '/lab');
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    await page.locator('#sec-timing-h').click();
+    const entry = page.locator('#straddle-entry_time');
+    await entry.waitFor();
+    // typing a time off the 5-minute grid snaps to it and says so
+    await typeIn(entry, '1002'); await entry.press('Enter');
+    assert.strictEqual(await entry.inputValue(), '10:00');
+    assert(/not allowed here; set to 10:00/.test(await page.locator('.tf[data-role="entry"] .f-meta').innerText()), 'snap note shown');
+    // the list: 15-minute steps, filtered by typing, picked with the keyboard
+    await page.locator('.tf[data-role="entry"] .tf-open').click();
+    await page.locator('.tf-iv button', { hasText: '15 min' }).click();
+    const listed = await page.locator('.tf-grid [role="option"]').allInnerTexts();
+    assert(listed.includes('10:15') && !listed.includes('10:05'), '15-minute list');
+    await typeIn(entry, '103'); assert.deepStrictEqual(await page.locator('.tf-grid [role="option"]').allInnerTexts(), ['10:30'], 'typing 103 filters the 15-minute list to 10:30');
+    await entry.press('ArrowDown'); await entry.press('Enter');
+    assert.strictEqual(await entry.inputValue(), '10:30');
+    // order: an entry after the square-off is an error and blocks Run
+    await typeIn(entry, '15:00'); await entry.press('Enter');
+    const exit = page.locator('#straddle-exit_time');
+    await typeIn(exit, '14:00'); await exit.press('Enter');
+    await page.locator('.tf[data-role="entry"] .f-meta [role="alert"]', { hasText: 'before the square-off' }).waitFor();
+    assert(await page.locator('.rail-foot .run-btn').isDisabled(), 'Run is disabled while the times are out of order');
+    assert(/\d to fix/.test(await page.locator('#sec-timing-h').innerText()), 'section badge counts the problems');
+    await typeIn(exit, '15:15'); await exit.press('Enter');
+    await page.locator('.rail-foot .run-btn:not([disabled])').waitFor();
+    await ctx.close();
+  });
+  await step('stops and targets: typed values with units, a wide range, a unit switch and an off switch', async () => {
+    const { ctx, page } = await ctxFor(1440, 900);
+    await page.goto(BASE + '/lab');
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    await page.locator('#sec-risk-h').click();
+    const sl = page.locator('#straddle-sl_pct-n');
+    await typeIn(sl, '250'); await sl.press('Enter');
+    assert.strictEqual(await sl.inputValue(), '250', 'a 250% stop is allowed (was capped at 75%)');
+    await typeIn(sl, '900'); await sl.press('Enter');
+    assert.strictEqual(await sl.inputValue(), '500');
+    assert(/outside 5%–500%/.test(await page.locator('#sec-risk .lf').first().innerText()), 'clamp explained');
+    const cap = page.locator('#straddle-max_loss_per_lot-on');
+    await cap.check();
+    assert(Number((await page.locator('#straddle-max_loss_per_lot-n').inputValue()).replace(/,/g, '')) > 0, 'the loss cap switched on with a value');
+    // the builder: one field in four units
+    await page.goto(BASE + '/lab?s=short_strangle');
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    await page.locator('#sec-risk-h').click();
+    await page.locator('#short_strangle-short_sl-on').check();
+    await page.locator('#sec-risk .lf-units').first().locator('button', { hasText: '₹/lot' }).click();
+    const v = page.locator('#short_strangle-short_sl-n');
+    await typeIn(v, '2500'); await v.press('Tab');
+    assert.strictEqual(await v.inputValue(), '2,500', 'grouped when not being edited');
+    assert((await page.locator('#sec-risk-h').innerText()).includes('₹2,500/lot'), 'the section summary reads ₹2,500/lot');
+    await ctx.close();
+  });
+  await step('builder legs: edit a leg, the engine refuses a strike outside the stored window with the reason, reset', async () => {
+    const { ctx, page } = await ctxFor(1440, 900);
+    await page.goto(BASE + '/lab?s=iron_condor');
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    assert.strictEqual(await page.locator('.lt-t tbody tr').count(), 4);
+    await page.locator('.lt-ed-btn').nth(3).click();
+    const steps = page.locator('.lt-edit .lt-strike input').first();
+    await typeIn(steps, '9'); await steps.press('Enter');
+    await typeIn(steps, '16'); await steps.press('Enter');
+    assert.strictEqual(await steps.inputValue(), '10', 'ATM offset capped at 10 in the editor');
+    // a leg relative to another, too far out: the engine's own check names the leg
+    await page.locator('.lt-edit select').first().selectOption('leg');
+    const rel = page.locator('.lt-edit .lt-strike input').first();
+    await typeIn(rel, '16'); await rel.press('Enter'); // L3 is 2 strikes out: 2 + 16 = 18, past the synthetic chain's ATM ± 15
+    await page.locator('.lt-gates', { hasText: /L4 is \d+ strikes from ATM; only ATM ± 15 is stored/ }).waitFor();
+    assert(await page.locator('.rail-foot .run-btn').isDisabled(), 'Run is disabled while a leg is refused');
+    assert(await page.locator('.lt-t tr[data-bad]').count() >= 1, 'the leg row is marked');
+    await page.locator('.lt-actions .qbtn', { hasText: 'Reset' }).click();
+    await page.locator('.lt-gates').waitFor({ state: 'detached' });
+    await page.locator('.rail-foot .run-btn:not([disabled])').waitFor();
+    await ctx.close();
+  });
+  await step('data status: one line with the caveat, the assumptions open below it', async () => {
+    const { ctx, page } = await ctxFor(1366, 768);
+    await page.goto(BASE + '/lab');
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    const h = (await page.locator('.ds-line').boundingBox()).height;
+    assert(h <= 44, `status line is ${h}px tall`);
+    assert(/not evidence about NIFTY/.test(await page.locator('.ds-line').innerText()));
+    await page.locator('.ds-line .qlink', { hasText: 'Assumptions' }).click();
+    assert(/Fills/.test(await page.locator('.ds-panel').innerText()));
+    await ctx.close();
+  });
+  await step('desktop widths 1280–1920: no sideways scroll, nothing clipped in the rail, the rail stays short', async () => {
+    for (const w of [1280, 1366, 1440, 1536, 1920]) {
+      const { ctx, page } = await ctxFor(w, 800);
+      for (const s of ['straddle', 'iron_condor']) {
+        await page.goto(`${BASE}/lab?s=${s}`);
+        await page.locator('.exec').waitFor({ timeout: 30000 });
+        for (const id of ['strategy', 'timing', 'risk', 'data', 'capital', 'advanced']) { const h = page.locator(`#sec-${id}-h`); if (await h.getAttribute('aria-expanded') === 'false') await h.click(); }
+        await page.waitForTimeout(350);
+        const l = await layout(page);
+        assert(l.sideways <= 1, `${w}px ${s}: page scrolls sideways by ${l.sideways}px`);
+        const rb = await page.locator('.rail-body').evaluate((e) => [e.scrollWidth, e.clientWidth, e.scrollHeight]);
+        assert(rb[0] <= rb[1] + 1, `${w}px ${s}: rail content is wider than the rail (${rb[0]} > ${rb[1]})`);
+        assert(rb[2] <= 3700, `${w}px ${s}: every rail section open is ${rb[2]}px tall`);
+      }
+      await ctx.close();
+    }
+  });
+
+  await step('optimiser: the four-leg model cannot be searched, and the button says why', async () => {
+    const { ctx, page } = await ctxFor(1366, 768);
+    await page.goto(`${BASE}/lab?s=fourleg`);
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    const b = page.locator('.rail-foot .opt-btn');
+    assert(await b.isDisabled(), 'Optimise is disabled for the four-leg model');
+    assert(/synthetic stock model/.test(await b.getAttribute('title')), 'the reason is on the button');
+    await ctx.close();
+  });
+  {
+    const { ctx, page } = await ctxFor(1366, 768);
+    const lead = () => page.locator('.exec .m--lead .m-v').innerText();
+    await step('optimiser: the estimate comes first; a study gives three labelled answers and a table without the held-out test', async () => {
+      await page.goto(`${BASE}/lab?s=straddle`);
+      await page.locator('.exec').waitFor({ timeout: 30000 });
+      await page.locator('.rail-foot .opt-btn').click();
+      await page.locator('.opt-axes').waitFor();
+      await page.locator('.opt-setup .figs .m', { hasText: /will try/i }).waitFor({ timeout: 10000 });
+      const est = await page.locator('.opt-setup .figs').innerText();
+      assert(/grid\s+35\b/i.test(est) && /will try\s+36\b/i.test(est) && /can run\s+36\b/i.test(est), est);
+      const l = await layout(page);
+      assert(l.sideways <= 1, `optimiser setup scrolls sideways by ${l.sideways}px`);
+      await page.screenshot({ path: path.join(SHOTS, 'opt-setup.png') });
+      await page.locator('button', { hasText: 'Start the study' }).click();
+      await page.locator('.opt-answers').waitFor({ timeout: 90000 });
+      const labels = await page.locator('.opt-card .opt-card-h .lbl').allInnerTexts();
+      assert.deepStrictEqual(labels.map((t) => t.toLowerCase()), ['in-sample leader', 'best out-of-sample', 'most robust']);
+      assert(/not evidence/i.test(await page.locator('.opt-card').first().innerText()), 'the leader is labelled as not evidence');
+      assert.strictEqual(await page.locator('.opt-tbl tbody tr').count(), 36, 'every configuration is in the table');
+      assert(!/test/i.test(await page.locator('.opt-tbl thead').innerText()), 'no held-out test column in the table');
+      // the file the page would save, read inside the page (a real download leaves Playwright crashing on close)
+      await page.evaluate(() => { const orig = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { if (this.download) { window.__csv = fetch(this.href).then((r) => r.text()); return; } return orig.call(this); }; });
+      await page.locator('button', { hasText: 'Export CSV' }).click();
+      const head = (await page.evaluate(() => window.__csv)).split('\n')[0];
+      assert(head.startsWith('rank_by_training,config,sl_pct,target_per_lot') && !/test|full/.test(head), head);
+      const l2 = await layout(page);
+      assert(l2.sideways <= 1, `study results scroll sideways by ${l2.sideways}px`);
+      await page.screenshot({ path: path.join(SHOTS, 'opt-results.png'), fullPage: true });
+    });
+    await step('optimiser: "Run a backtest" on an answer loads it into the Lab and reproduces the figure the study measured', async () => {
+      const card = page.locator('.opt-card').first();
+      const want = (await card.innerText()).match(/held-out test included: net (\S+)/)[1];
+      await card.locator('button', { hasText: 'Run a backtest' }).click();
+      await page.locator('.exec').waitFor({ timeout: 30000 });
+      await page.waitForFunction(() => !document.querySelector('.stale') && document.querySelector('.ws-status')?.getAttribute('data-state') === 'done', null, { timeout: 30000 });
+      assert.strictEqual((await lead()).trim(), want);
+      assert(/Loaded from the optimisation lab/.test(await page.locator('.rail-note').innerText()), 'the rail says where the settings came from');
+    });
+    await step('optimiser: a cancelled study keeps what it measured, is saved, and resumes to the end', async () => {
+      await page.locator('.rail-foot .opt-btn').click();
+      await page.locator('button', { hasText: 'Set up another study' }).click();
+      await page.locator('.opt-axes tbody tr', { hasText: 'Entry' }).first().locator('input[type=checkbox]').check();
+      await page.locator('.opt-setup .figs .m', { hasText: /will try\s*176/i }).waitFor({ timeout: 10000 });
+      await page.locator('button', { hasText: 'Start the study' }).click();
+      await page.locator('.opt-rate', { hasText: /a second/ }).waitFor({ timeout: 60000 });
+      await page.locator('button', { hasText: 'Cancel, keep what is measured' }).click();
+      await page.locator('.ws-empty', { hasText: 'Cancelled' }).waitFor({ timeout: 30000 });
+      const n = Number((await page.locator('.ws-empty').innerText()).match(/(\d+) of 176 configurations were measured/)[1]);
+      assert(n >= 10 && n < 176, `measured ${n} before the cancel`);
+      await page.locator('.opt-tabs button', { hasText: 'Saved' }).click();
+      await page.locator('#opt-saved-h').waitFor();
+      const saved = await page.locator('#opt-saved-h').locator('xpath=../..').innerText();
+      assert(/Cancelled/.test(saved) && /Finished/.test(saved), saved);
+      await page.locator('#opt-saved-h').locator('xpath=../..').locator('button', { hasText: 'Resume' }).click();
+      await page.locator('.opt-answers').waitFor({ timeout: 90000 });
+      assert.strictEqual(await page.locator('.opt-tbl tbody tr').count(), 50, 'the first 50 of 176 rows are shown');
+      assert(/176 of 176/.test(await page.locator('.opt-tools').innerText()), 'all 176 configurations are in the table');
+    });
+    await ctx.close();
+  }
+  await step('optimiser on a phone: opened from the bottom bar, nothing scrolls sideways', async () => {
+    const { ctx, page } = await ctxFor(390, 844);
+    await page.goto(`${BASE}/lab?s=short_strangle`);
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    await page.locator('.ws-mbar .opt-btn').click();
+    await page.locator('.opt-axes').waitFor();
+    await page.waitForTimeout(400);
+    const l = await layout(page);
+    assert(l.sideways <= 1, `sideways ${l.sideways}px`);
+    await page.screenshot({ path: path.join(SHOTS, 'opt-phone.png'), fullPage: true });
+    await ctx.close();
+  });
   await step('loading state: progress is shown while day files download', async () => {
     const { ctx, page } = await ctxFor(1366, 768);
     await ctx.route('https://stubproject.supabase.co/storage/**', async (route) => { await new Promise((r) => setTimeout(r, 1500)); await route.fallback(); });

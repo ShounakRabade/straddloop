@@ -1,7 +1,7 @@
 # Engine interfaces (v1)
 
 The contract between the research engine and everything built on it (Lab UI, analytics, reports).
-Status: **v1, 20 Nov 2026**, matches the code on `claude/leg-engine`. Fields marked *(planned)* are agreed but
+Status: **v1, 23 Nov 2026**, matches the code on `feat/strategy-builder` (v1 gained optional fields only; older specs run unchanged). Fields marked *(planned)* are agreed but
 not in code yet; everything else is what the code produces. Change this file in the same PR as any change to a
 shape.
 
@@ -66,10 +66,11 @@ type StrikeRule =
                                              //   quotes exist); time = calendar days to expiry + the rest of the session
   | { by: 'leg'; leg: string; steps: number }; // relative to another leg's chosen strike, + = higher strike
 
-// Per-leg level: 'pct' of the leg's entry price, or 'points' of premium.
-// Short leg: stop when premium rises to entry × (1 + pct), target when it falls to entry × (1 − pct).
-// Long leg: the mirror image.
-interface LegLevel { kind: 'pct' | 'points'; value: number }
+// Per-leg level: 'pct' of the leg's entry price, 'points' of premium, 'rupees' on the leg's whole quantity, or
+// 'rupees_per_lot' of the leg. Rupee levels become premium points at entry: rupees ÷ qty, rupees_per_lot ÷ lot size.
+// Short leg: stop when premium rises to entry × (1 + pct) (or entry + points), target when it falls the same way.
+// Long leg: the mirror image. Levels above the entry round up to the tick, levels below round down (never below 0).
+interface LegLevel { kind: 'pct' | 'points' | 'rupees' | 'rupees_per_lot'; value: number }
 ```
 
 ATM is the listed strike nearest the index close of the bar before the entry bar (ties go to the lower
@@ -82,8 +83,15 @@ interface EntryRule {
   weekdays: number[];                        // 0 = Monday … 4 = Friday
   dte?: { min?: number; max?: number };      // calendar days from trade date to the nearest leg's expiry
   conditions: Condition[];                   // all must pass
+  max_entries?: number;                      // positions per session, 1–20 (default 1, left out when 1)
+  cooldown_min?: number;                     // minutes after a close before the next may open, 0–300 (default 0)
 }
 // One position at a time: while a position is open (including one carried overnight) no new entry is made.
+// The first entry of a session is one decision at `time`. With max_entries > 1, after a position closes at
+// minute c, the next is decided on the first bar T ≥ c + 1 + cooldown_min (on the or_inside candle grid when the
+// spec has that condition) where every entry rule passes, with T before adjust.cutoff and, intraday, before
+// exit.time. Strikes are picked again at T. A position carried in from an earlier session does not count
+// towards the session's max_entries.
 
 type Condition =
   | { kind: 'or_inside'; or_minutes: number; candle_minutes: number; mode: 'full' | 'body' | 'close' | 'overlap' }
@@ -104,7 +112,8 @@ interface ExitRule {
   target?: MoneyLevel;
   basis: 'net' | 'gross';                    // net = after charges paid and the estimated charges to close
 }
-interface MoneyLevel { kind: 'rupees_per_lot' | 'pct_premium'; value: number }
+interface MoneyLevel { kind: 'rupees_per_lot' | 'pct_premium' | 'rupees'; value: number }
+// rupees_per_lot is per base lot (× spec.lots); rupees is the whole position, whatever the lots;
 // pct_premium is a % of |net entry premium × qty| (credit for short structures, debit for long ones).
 
 interface AdjustRule {
@@ -172,10 +181,40 @@ interface Gate { code: GateCode; message: string; leg?: string }
 | `NO_BID_ASK` | warning | always on real data: fills are candle price ± slippage |
 | `EXPIRY_ASSUMED` | warning | a multi-day hold on day files whose expiry date is assumed (weekday rule, holidays not applied) |
 | `DATA_GAP` | warning (run time) | a held position crossed weekdays with no stored data, or a carried leg had no prices and was closed at its last seen price (never settled or invented) |
-| `INVALID_SPEC` | error | structural problems (no legs, bad ratio, unknown leg reference, bad time) |
+| `INVALID_SPEC` | error / warning | structural problems (no legs, bad ratio, unknown leg reference, bad time, trades per session or cooldown out of range); warnings for rules that can never fire (an adjustment with no stop, more trades per session than the cutoff leaves time for) |
 
 `legs.run` throws an `Error` whose `gates` lists the errors and warnings when any error applies; the worker
 passes them on as `{ id, ok: false, error, gates }`, so the page can list every reason at once.
+
+### Running a spec
+
+`StraddloopLegs.run(sessions, spec, { L, caps?, lean? })`. `L` is the ledger module (dated charges). `lean: true`
+(optimisation studies, `compute.evaluate`) leaves out the event text and the per-leg display rows, and the
+per-bar marks carry prices only; fills, positions and everything the ledger reads are identical to a full run
+(`tests/legs.test.mts` checks it). The engine never modifies a session: lookups that depend only on a session
+(minute → bar, strikes listed at each bar, a leg's expiry, the opening range, the dataset caps) are cached
+beside it in WeakMaps, so a study that reruns the same sessions pays for them once.
+
+### Lab strategies (`web/lib/strategyRegistry.ts`)
+
+The Lab, the notebook and `?s=` links hold flat parameters keyed by a slug. The registry gives every strategy one
+shape: the published rule sets (01–04, their own engines) and the strategy builder's structures (the templates
+above). A builder structure's parameters become a spec in `builderSpec`; the run request then carries
+`strategy: 'legs'`, `template` and `spec` (JSON). The parameters:
+
+* legs: `legs` (a JSON list of `LegDraft`, or `''` for the structure's own legs built from `offset` and `width`);
+  each draft has `id`, `action`, `right`, `ratio`, `strike` (a StrikeRule), optional `nth`, and optional `stop` /
+  `target`: absent = the default for its side, `null` = none on that leg, or its own `LegLevel`;
+* side defaults: `short_sl`, `short_tp`, `long_sl`, `long_tp`, each with `<key>_unit` (`pct`, `points`, `rupees`,
+  `rupees_per_lot`); position levels `pos_sl`, `pos_tp` with `<key>_unit` (`rupees_per_lot`, `rupees`,
+  `pct_premium`). Zero turns a level off;
+* times and repeats: `entry_time`, `cutoff` (last new entry), `exit_time` (square-off), `hold`, `max_entries`,
+  `cooldown_min`, `on_leg_stop`, `max_reentries`; sizing and costs: `lots`, `slip_pct`, account settings.
+
+The expiry series of every leg follows the data series chosen in the Lab. The page runs `legs.validate` on the
+spec it is about to send, against `labCaps(real, series)` (`web/lib/legs/caps.ts`), so a refusal is shown while
+editing; the run checks again against the loaded sessions' caps. Templates that need the next expiry are listed but
+blocked with the reason; the four-leg model is the one strategy the optimiser refuses.
 
 ---
 
@@ -330,7 +369,7 @@ A re-entered leg joins the same position.
 interface DateRange {
   request: { from: string; to: string };     // what the user picked, inclusive
   dataset: { source: 'dhan' | 'synthetic' | 'local'; underlying: string; series: Series; interval: '1m' };
-  bounds: { floor: '2023-01-01'; earliest: string | null; latest_validated: string | null; latest_any: string | null };
+  bounds: { floor: string; earliest: string | null; latest_validated: string | null; latest_any: string | null }; // floor = the earliest stored day
   effective: { from: string; to: string } | null; // request clamped to [floor, min(latest_any, today IST)]; null if nothing left
   files: { date: string; path: string }[];   // the day files the run downloads (one per runnable date)
   days: DayEntry[];                          // every calendar day in `effective`, weekends included
@@ -352,14 +391,40 @@ interface DayEntry {
 Rules: `runnable` = validated + partial days that have a file (partial days run; their gaps stay gaps).
 A weekday with no file is `holiday` when the pipeline recorded one or the (unverified) NSE list names it,
 otherwise `missing`. Weekends are never "missing". The end date is never hardcoded: `bounds.latest_*` come
-from the database for the chosen underlying and series. Presets end on `latest_any` (the last day a run can
-use). `last_7/30/90` count stored usable days backwards; `6m/1y/2y/3y` start the day after the same calendar
+from the database for the chosen underlying and series, and so does the start: history begins on the series'
+earliest stored day (`FLOOR` 2023-01-01 is only a fallback when nothing is stored). A request that falls
+entirely before it says so ("Stored history starts on …"); one entirely after the last stored day says that.
+`loadCommand` asks for the dates as requested, older ones included, but not before `LOAD_FLOOR` (2020-07-01,
+where the dated charge table starts). Presets end on `latest_any` (the last day a run can use).
+`last_7/30/60/90` count stored usable days backwards; `6m/1y/2y/3y` start the day after the same calendar
 date N months earlier, clamped to `earliest`; `max` = `earliest` → `latest_any`.
 
 `buildDateRange(request, inventory, statuses, opts)` options: `source` ('dhan' | 'local': local files are
-`partial`, quality unchecked), `underlying`, `series`, `floor` (default 2023-01-01), `today` (default today in
-IST). The NSE holiday list (`NSE_HOLIDAYS_UNVERIFIED`, 2023–2025, recalled, not verified) is built in and
+`partial`, quality unchecked), `underlying`, `series`, `floor` (default: the earliest stored day), `today`
+(default today in IST). The NSE holiday list (`NSE_HOLIDAYS_UNVERIFIED`, 2023–2025, recalled, not verified) is built in and
 only labels weekdays that have no file.
+
+### Moving through history (Lab range bar, rolling windows)
+
+Windows are calendar days, both ends included, on UTC dates, so month lengths and leap days are exact:
+
+```ts
+windowLength({ from, to }): number            // 1 Apr–30 Jul 2026 = 121
+nextWindow(r, len?) / prevWindow(r, len?)     // the adjacent window, `len` days (default r's own length):
+                                              //   1 Apr–30 Jul 2026 → 31 Jul–28 Nov 2026; before it 1 Dec 2025–31 Mar 2026
+shiftRange(r, n, len?)                        // moved n days (the +30 / +60 / +90 buttons)
+fitWindow(target, bounds): { range | null; cut: start | end | both | null; kept; asked; outside: before | after | null }
+                                              // cut to the stored history, never moved; null when none of it is stored
+lastN(n, sessions | days, inventory)      // the last N stored sessions or calendar days, ending on latest_any
+rollingWindows(span, W, S): { windows; leftover; capped }   // whole W-day windows every S days; at most MAX_WINDOWS (400)
+```
+
+The range bar keeps the length that was asked for: a window cut at the end of the data does not make the next
+move shorter. Rolling windows run in the worker (`{ id, rolling: { params, days, windows } }`, progress and cancel
+as for research) through `analytics.runRolling`: each window is its own backtest through `compute.evaluate`,
+started flat with the full capital, so the latest run, its replay and its exports are untouched; rows carry
+sessions (all handed to the engine), traded days, net, win rate, max drawdown, Sharpe, profit factor, best and
+worst day.
 
 Every surface reads this one object: the calendar shades `days`, the run downloads `runnable`, progress
 counts `runnable.length`, the result carries `range.key`, and the report prints `counts`. The run result's
@@ -393,3 +458,67 @@ file quality is `complete`). No new database objects are needed; `market_day_sta
 | Greeks / delta strikes | no on real data; yes on the synthetic model (its vol is known) |
 | Other underlyings | no stored data |
 | Multi-day holds and expiry settlement | real data yes (contracts continue across stored days); synthetic no. Expiry dates in today's day files are assumed (weekday rule): a holiday-shifted expiry (for example around Diwali) would be settled on the wrong day until bhavcopy expiries are imported, so such runs carry `EXPIRY_ASSUMED` |
+
+## 8. Optimisation studies (`public/engine/study.js`, `web/lib/optimiser/`)
+
+A study measures many configurations of one Lab strategy on one set of sessions and chooses from the in-sample
+part alone. The Research tab's `analytics.runOptimisation` (section-by-section analysis of the latest run) is
+unchanged; studies are the Lab's **Optimise** view.
+
+```
+sessions  [0 ........................ isEnd) [isEnd ...... n)
+           training [0, a)  validation [a, isEnd)   held-out test
+```
+
+**Windows** (`study.studyPlan(dates, { split, folds, wfMode, blocks })`, fixed before any configuration runs):
+`split` by `analytics.splitChrono`; walk-forward folds inside `[0, isEnd)` (the first half trains, the rest is
+cut into `folds` test blocks; rolling = the same training length, anchored = from session 0); PBO blocks (an even
+number, 4–8) and thirds of `[0, isEnd)`. `volRegimes(sessions, isEnd)` labels each session low / mid / high by its
+index range, cut at the in-sample terciles.
+
+**Measuring** (`summarise(days, plan, regimes, { capital })`): one configuration's day records
+(`analytics.fromRun(compute.evaluate(params, sessions)).days`) become `perf` figures for the full period,
+training, validation, in-sample, held-out test, each fold's training and test window, the thirds and the regimes,
+plus per-block sums (s, s², count) for PBO and walk-forward pooling, and longest win / loss runs. The day records
+are not kept.
+
+**Choosing** (`selectStudy(cands, plan, { objective, weights, minTrades, topK })`), never reading `test`:
+
+| Answer | Rule |
+| --- | --- |
+| In-sample leader | best training score (not evidence) |
+| Best out-of-sample | best validation score among the top K by training |
+| Most robust | `mostRobust` over the top K by in-sample score, scored by `robustScore` |
+
+Ties go to the lower configuration number, so the same measurements in any order give the same answers. Also
+returned: `walk_forward` (re-selection per fold, out-of-sample pooled exactly from the block sums, efficiency,
+distinct choices), `pbo` (combinatorially symmetric cross-validation on the blocks, combinations built without
+recursion), `dsr` (deflated Sharpe of the leader and the best out-of-sample), `rank_corr_train_val`,
+`min_trades`, `selection_rule`. `robustScore(summary, neighbours, stressed)` is the plain mean of the shares that
+could be measured: walk-forward test blocks, thirds and regimes that made money, validation made money,
+neighbours (one step either side on each ordered setting) that made money in-sample, and in-sample net kept at
+doubled slippage.
+
+**Space** (`lib/optimiser/space.ts`): `axesFor(strategy, params)` lists searchable settings with bounds and grain;
+`rangeValues` turns from / to / step into values; `valuesAt` / `indexOf` / `positionsAt` enumerate the grid by index
+(mixed radix); `plannedIndices` is the whole grid or a seeded sample (`HARD_CAP` 20,000); `paramsFor` writes a
+configuration into Lab parameters (builder call / put offsets move every ATM-placed leg of that side);
+`refusal` applies the time bounds and order and `legs.validate` with the data's caps; `estimate` counts all of it
+before anything runs. Configuration 0 is the Lab's own settings; configuration n is grid point n − 1.
+
+**Running** (`lib/optimiser/controller.ts` `runStudy(cfg, { pool, store, init, onProgress, signal })`): refusals are
+recorded, the rest are measured in batches on the pool, each batch written to the store; then the answers, then the
+finalists' neighbours and doubled-slippage runs (`stressSlip(s) = max(2s, s + 0.5)`), then the robust answer.
+A cancel stops before the next configuration; a resumed study measures only what is missing and must see the same
+number of sessions. The pool is `WorkerPool` (browser, `public/engine/optimise_worker.js`) or any object with the
+same `init / evaluate / detail / cancel` (Node tests use an in-process pool).
+
+Optimiser worker messages: `{ id, init: { days | synthetic, lotSize, plan, capital, reuse? } } → { plan, n }`;
+`{ id, evaluate: [{ idx, params }] } → { id, item }` per configuration, then `{ id, ok, done }`;
+`{ id, detail: { params } } → { days: [{ date, net, traded, status }] }`; `{ cancel: true }`.
+
+**Store** (`lib/optimiser/store.ts`): IndexedDB `straddloop-optimiser`, stores `studies` (by id) and `cands` (by
+[study, key]; key `g<n>` a configuration, `s<n>` the same at doubled slippage). Studies stay in the browser.
+
+**Table and CSV** (`lib/optimiser/rows.ts`): training, validation and in-sample figures only; the held-out test and
+the full period (which contains it) are left out.

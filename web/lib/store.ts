@@ -1,6 +1,6 @@
 'use client';
 import { supabase } from './supabase';
-import type { Profile, RunResult, RunSummary, SavedRun, StrategySlug, Params } from './types';
+import type { LabSlug, Profile, RunResult, RunSummary, SavedRun, Params } from './types';
 
 const RUNS_KEY = 'straddloop.runs.v1';
 const PROFILE_KEY = 'straddloop.profile.v1';
@@ -49,11 +49,12 @@ export async function listRuns(): Promise<SavedRun[]> {
   return [...local, ...((data ?? []) as SavedRun[])];
 }
 
-export async function saveRun(strategy: StrategySlug, params: Params, result: RunResult, note = ''): Promise<{ where: 'cloud' | 'browser' }> {
+export async function saveRun(strategy: LabSlug, params: Params, result: RunResult, note = ''): Promise<{ where: 'cloud' | 'browser' }> {
   const row = { strategy, params, summary: summarise(result), note };
   const uid = await userId();
   if (uid) {
     const { error } = await supabase()!.from('runs').insert(row);
+    if (error && /runs_strategy_check/.test(error.message)) throw new Error('the runs table in Supabase only accepts the first three strategies. Run web/supabase/schema.sql again in the SQL editor to allow every Lab strategy');
     if (error) throw new Error(error.message);
     return { where: 'cloud' };
   }
