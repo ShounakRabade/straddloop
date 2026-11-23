@@ -1,7 +1,7 @@
 # Engine interfaces (v1)
 
 The contract between the research engine and everything built on it (Lab UI, analytics, reports).
-Status: **v1, 20 Nov 2026**, matches the code on `claude/leg-engine`. Fields marked *(planned)* are agreed but
+Status: **v1, 23 Nov 2026**, matches the code on `feat/strategy-builder` (v1 gained optional fields only; older specs run unchanged). Fields marked *(planned)* are agreed but
 not in code yet; everything else is what the code produces. Change this file in the same PR as any change to a
 shape.
 
@@ -66,10 +66,11 @@ type StrikeRule =
                                              //   quotes exist); time = calendar days to expiry + the rest of the session
   | { by: 'leg'; leg: string; steps: number }; // relative to another leg's chosen strike, + = higher strike
 
-// Per-leg level: 'pct' of the leg's entry price, or 'points' of premium.
-// Short leg: stop when premium rises to entry × (1 + pct), target when it falls to entry × (1 − pct).
-// Long leg: the mirror image.
-interface LegLevel { kind: 'pct' | 'points'; value: number }
+// Per-leg level: 'pct' of the leg's entry price, 'points' of premium, 'rupees' on the leg's whole quantity, or
+// 'rupees_per_lot' of the leg. Rupee levels become premium points at entry: rupees ÷ qty, rupees_per_lot ÷ lot size.
+// Short leg: stop when premium rises to entry × (1 + pct) (or entry + points), target when it falls the same way.
+// Long leg: the mirror image. Levels above the entry round up to the tick, levels below round down (never below 0).
+interface LegLevel { kind: 'pct' | 'points' | 'rupees' | 'rupees_per_lot'; value: number }
 ```
 
 ATM is the listed strike nearest the index close of the bar before the entry bar (ties go to the lower
@@ -82,8 +83,15 @@ interface EntryRule {
   weekdays: number[];                        // 0 = Monday … 4 = Friday
   dte?: { min?: number; max?: number };      // calendar days from trade date to the nearest leg's expiry
   conditions: Condition[];                   // all must pass
+  max_entries?: number;                      // positions per session, 1–20 (default 1, left out when 1)
+  cooldown_min?: number;                     // minutes after a close before the next may open, 0–300 (default 0)
 }
 // One position at a time: while a position is open (including one carried overnight) no new entry is made.
+// The first entry of a session is one decision at `time`. With max_entries > 1, after a position closes at
+// minute c, the next is decided on the first bar T ≥ c + 1 + cooldown_min (on the or_inside candle grid when the
+// spec has that condition) where every entry rule passes, with T before adjust.cutoff and, intraday, before
+// exit.time. Strikes are picked again at T. A position carried in from an earlier session does not count
+// towards the session's max_entries.
 
 type Condition =
   | { kind: 'or_inside'; or_minutes: number; candle_minutes: number; mode: 'full' | 'body' | 'close' | 'overlap' }
@@ -104,7 +112,8 @@ interface ExitRule {
   target?: MoneyLevel;
   basis: 'net' | 'gross';                    // net = after charges paid and the estimated charges to close
 }
-interface MoneyLevel { kind: 'rupees_per_lot' | 'pct_premium'; value: number }
+interface MoneyLevel { kind: 'rupees_per_lot' | 'pct_premium' | 'rupees'; value: number }
+// rupees_per_lot is per base lot (× spec.lots); rupees is the whole position, whatever the lots;
 // pct_premium is a % of |net entry premium × qty| (credit for short structures, debit for long ones).
 
 interface AdjustRule {
@@ -172,10 +181,29 @@ interface Gate { code: GateCode; message: string; leg?: string }
 | `NO_BID_ASK` | warning | always on real data: fills are candle price ± slippage |
 | `EXPIRY_ASSUMED` | warning | a multi-day hold on day files whose expiry date is assumed (weekday rule, holidays not applied) |
 | `DATA_GAP` | warning (run time) | a held position crossed weekdays with no stored data, or a carried leg had no prices and was closed at its last seen price (never settled or invented) |
-| `INVALID_SPEC` | error | structural problems (no legs, bad ratio, unknown leg reference, bad time) |
+| `INVALID_SPEC` | error / warning | structural problems (no legs, bad ratio, unknown leg reference, bad time, trades per session or cooldown out of range); warnings for rules that can never fire (an adjustment with no stop, more trades per session than the cutoff leaves time for) |
 
 `legs.run` throws an `Error` whose `gates` lists the errors and warnings when any error applies; the worker
 passes them on as `{ id, ok: false, error, gates }`, so the page can list every reason at once.
+
+### Running a spec
+
+`StraddloopLegs.run(sessions, spec, { L, caps?, lean? })`. `L` is the ledger module (dated charges). `lean: true`
+(optimisation studies, `compute.evaluate`) leaves out the event text and the per-leg display rows, and the
+per-bar marks carry prices only; fills, positions and everything the ledger reads are identical to a full run
+(`tests/legs.test.mts` checks it). The engine never modifies a session: lookups that depend only on a session
+(minute → bar, strikes listed at each bar, a leg's expiry, the opening range, the dataset caps) are cached
+beside it in WeakMaps, so a study that reruns the same sessions pays for them once.
+
+### Lab strategies (`web/lib/strategyRegistry.ts`)
+
+The Lab, the notebook and `?s=` links hold flat parameters keyed by a slug. The registry gives every strategy one
+shape: the published rule sets (01–04, their own engines) and the strategy builder's structures (the templates
+above). A builder structure's parameters (`offset`, `width`, `lots`, `entry_time`, `exit_time`, `hold`,
+`short_sl_pct`, `long_sl_pct`, `target_per_lot`, `stop_per_lot`, `on_leg_stop`, `max_reentries`, `max_entries`,
+`cooldown_min`, `cutoff`, `slip_pct`, account settings) become a spec in `builderSpec`; the run request then carries
+`strategy: 'legs'`, `template` and `spec` (JSON). Zero turns a stop or target off. Templates that need the next
+expiry are listed but blocked with the reason; the four-leg model is the one strategy the optimiser refuses.
 
 ---
 

@@ -6,7 +6,8 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Logo } from '@/components/ui';
-import { STRATEGIES, SYNTHETIC_KEYS, bySlug, describeParams, type Field } from '@/lib/strategies';
+import { SYNTHETIC_KEYS, describeParams, type Field } from '@/lib/strategies';
+import { CORE_BUILDER, GROUPS, REGISTRY, inGroup, labStrategy, slugOfResult } from '@/lib/strategyRegistry';
 import { useLab, type DayRef } from '@/lib/useLab';
 import { useSession } from '@/lib/useSession';
 import { cloudEnabled } from '@/lib/supabase';
@@ -14,10 +15,10 @@ import { saveRun } from '@/lib/store';
 import { availability, download, readLocal, statuses, type Availability, type ExpiryFlag } from '@/lib/marketData';
 import { boundsOf, buildDateRange, presetRange, type InventoryDay, type StatusRow } from '@/lib/dateRange';
 import { ENGINE_ONLY_KEYS, PARAM_SPACE, choiceLabel } from '@/lib/researchSpace';
-import { ENTRY, EXIT_TEXT, LEGS, SECTIONS, STRATEGY_GROUP, sectionOf, type SectionId } from '@/lib/labSections';
+import { STRATEGY_GROUP, sectionOf, type SectionId } from '@/lib/labSections';
 import { GLOSSARY } from '@/lib/glossary';
 import { inr, shortDate } from '@/lib/format';
-import type { Params, StrategySlug } from '@/lib/types';
+import type { LabSlug, Params } from '@/lib/types';
 import { Icon, ParamField, Section, Tip } from '@/components/lab/kit';
 import { Calendar } from '@/components/lab/Calendar';
 import { ResearchPanel } from '@/components/research/ResearchPanel';
@@ -34,7 +35,7 @@ type LocalDay = { path: string; date: string; buf?: ArrayBuffer };
 type Meta = { key: string; dataKey: string; isDefault: boolean };
 
 const GUIDE: { sec: SectionId | null; title: string; body: string }[] = [
-  { sec: 'strategy', title: 'Choose a strategy', body: 'Each strategy is a fixed set of legs with its own entry and exit rules, listed under it.' },
+  { sec: 'strategy', title: 'Choose a strategy', body: 'A published rule set, or a structure from the strategy builder. Its legs and its entry and exit rules are listed under it.' },
   { sec: 'data', title: 'Choose the market data', body: 'The synthetic model shows how a rule reacts to a setting. Real NIFTY candles show what the rule would have done on stored days.' },
   { sec: 'period', title: 'Pick the period', body: 'On real data, pick dates on the calendar. Each day shows whether it is stored, partial, missing or a holiday, and the count of sessions that will run.' },
   { sec: 'risk', title: 'Set capital and size', body: 'Starting capital, lots per leg, and what happens when margin is short. Margin is an estimate, never your broker’s figure.' },
@@ -50,10 +51,11 @@ const short = (f: Field, v: unknown) => {
 };
 
 export function LabClient() {
-  const [slug, setSlug] = useState<StrategySlug>('straddle');
-  const [params, setParams] = useState<Params>(STRATEGIES[0].defaults);
+  const [slug, setSlug] = useState<LabSlug>('straddle');
+  const [params, setParams] = useState<Params>(REGISTRY[0].defaults);
   const [booted, setBooted] = useState(false);
-  const [source, setSource] = useState<Source>(slug === 'ema_pullback' ? 'real' : 'synthetic');
+  const [source, setSource] = useState<Source>('synthetic');
+  const lastBuilder = useRef<LabSlug>('iron_condor');  // the structure the builder option opens on
   const [flag, setFlag] = useState<ExpiryFlag>('WEEK');
   const [avail, setAvail] = useState<Availability | null>(null);
   const [dayStatus, setDayStatus] = useState<StatusRow[]>(NO_STATUS);
@@ -77,8 +79,9 @@ export function LabClient() {
   const [beforeLoad, setBeforeLoad] = useState<Params | null>(null);  // the person's settings before they loaded a study's selection
   const lab = useLab();
   const { session, ready: sessionReady } = useSession();
-  const strategy = bySlug(slug)!;
-  const realOk = slug !== 'fourleg';
+  const strategy = labStrategy(slug) ?? REGISTRY[0];
+  const isFourleg = strategy.engine === 'fourleg';
+  const realOk = strategy.realOk;
   const real = source === 'real' && realOk;
   const sent = useRef(new Set<string>());
   const pending = useRef<Meta | null>(null);
@@ -99,18 +102,19 @@ export function LabClient() {
       const raw = sessionStorage.getItem(OPEN_KEY);
       if (raw) {
         sessionStorage.removeItem(OPEN_KEY);
-        const p = JSON.parse(raw) as Params, s = bySlug(String(p.strategy));
+        const p = JSON.parse(raw) as Params, s = labStrategy(String(p.strategy));
         if (s) {
-          setSlug(s.slug); setParams({ ...s.defaults, ...p }); if (s.slug === 'ema_pullback') setSource('real');
+          setSlug(s.slug); setParams({ ...s.defaults, ...p, strategy: s.slug }); if (!s.syntheticOk) setSource('real');
+          if (s.family === 'builder') lastBuilder.current = s.slug;
           if (p.data_from) { setSource('real'); setRequest({ from: String(p.data_from), to: String(p.data_to ?? '') }); if (p.data_flag === 'MONTH') setFlag('MONTH'); }
           setBooted(true); return;
         }
       }
     } catch { /* fall through to the default */ }
     const q = new URLSearchParams(window.location.search);
-    const s = bySlug(q.get('s') ?? '');
-    if (s) { setSlug(s.slug); setParams(s.defaults); if (s.slug === 'ema_pullback') setSource('real'); }
-    try { if (q.get('data') === 'real' || localStorage.getItem(SOURCE_KEY) === 'real' || s?.slug === 'ema_pullback') setSource('real'); } catch { /* storage blocked */ }
+    const s = labStrategy(q.get('s') ?? '');
+    if (s) { setSlug(s.slug); setParams(s.defaults); if (!s.syntheticOk) setSource('real'); if (s.family === 'builder') lastBuilder.current = s.slug; }
+    try { if (q.get('data') === 'real' || localStorage.getItem(SOURCE_KEY) === 'real' || (s && !s.syntheticOk)) setSource('real'); } catch { /* storage blocked */ }
     setBooted(true);
   }, []);
 
@@ -145,18 +149,22 @@ export function LabClient() {
   const changed = useMemo(() => describeParams({ ...strategy, fields }, params), [strategy, fields, params]);
   const lotSet = Number(params.lot_size) > 0;
   // Engine settings that have no field in the rail (set only by loading an optimisation study). Always listed, never silent.
-  const engineSet = ENGINE_ONLY_KEYS.filter((k) => params[k] !== undefined);
+  // (a key this strategy has a field for is not engine-only: Strategy 01 and 03 have an exit-time field, so a default
+  // run there would otherwise count as "1 changed" and never become the default-rules baseline)
+  const engineSet = ENGINE_ONLY_KEYS.filter((k) => params[k] !== undefined && !strategy.fields.some((f) => f.key === k));
   const spaceLabel = (k: string) => [...PARAM_SPACE.straddle, ...PARAM_SPACE.orb].find((x) => x.key === k)?.label ?? k;
   const nChanged = changed.length + (lotSet ? 1 : 0) + engineSet.length;
   const realReady = !!range && range.runnable.length > 0;
-  const canRun = booted && (real ? realReady : true);
+  const canRun = booted && !strategy.blocked && (real ? realReady : true);
 
+  // What the run request carries: builder structures add their StrategySpec, built from these parameters.
   const runParams = useMemo((): Params => {
-    if (!real || !range || !range.runnable.length) return params;
-    return { ...params, data_from: range.runnable[0], data_to: range.runnable[range.runnable.length - 1], data_flag: flag, range_key: range.key };
-  }, [real, range, params, flag]);
+    const base = strategy.toRunParams(params, { series: real ? flag : 'WEEK' });
+    if (!real || !range || !range.runnable.length) return base;
+    return { ...base, data_from: range.runnable[0], data_to: range.runnable[range.runnable.length - 1], data_flag: flag, range_key: range.key };
+  }, [strategy, real, range, params, flag]);
   const configKey = useMemo(() => JSON.stringify([slug, real ? 'real' : 'syn', runParams]), [slug, real, runParams]);
-  const dataKey = real ? `real:${flag}:${range?.key ?? ''}` : slug === 'fourleg' ? `syn:${params.months}` : `syn:${params.days}:${params.seed}:${params.iv}`;
+  const dataKey = real ? `real:${flag}:${range?.key ?? ''}` : isFourleg ? `syn:${params.months}` : `syn:${params.days}:${params.seed}:${params.iv}`;
   const isDefault = useMemo(
     () => strategy.fields.filter((f) => !SYNTHETIC_KEYS.includes(f.key) && f.key !== 'months').every((f) => params[f.key] === strategy.defaults[f.key]) && !lotSet && !engineSet.length,
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -167,7 +175,7 @@ export function LabClient() {
     setTried(configKey);
     setSaved({ state: 'idle' });
     const m: Meta = { key: configKey, dataKey, isDefault };
-    if (!real) { pending.current = m; lab.run(params); return; }
+    if (!real) { pending.current = m; lab.run(runParams); return; }
     const r = range!;
     setDataErr(null);
     const missing = r.files.filter((f) => !sent.current.has(f.path));
@@ -189,7 +197,7 @@ export function LabClient() {
     const days: DayRef[] = r.files.map((f) => ({ path: f.path, buf: bufs.get(f.path) }));
     pending.current = m;
     lab.run(runParams, days);
-  }, [canRun, loading, configKey, dataKey, isDefault, real, lab, params, range, local, runParams]);
+  }, [canRun, loading, configKey, dataKey, isDefault, real, lab, range, local, runParams]);
   const runRef = useRef(runNow);
   runRef.current = runNow;
 
@@ -198,8 +206,10 @@ export function LabClient() {
     if (lab.status !== 'done' || !lab.result || !pending.current) return;
     const m = pending.current;
     setMeta(m);
-    if (m.isDefault) setBaseline((b) => (b && b.strategy === lab.result!.strategy && b.dataKey === m.dataKey && b.label !== 'Default rules' ? b
-      : { label: 'Default rules', dataKey: m.dataKey, strategy: lab.result!.strategy, m: headline(lab.result!), key: m.key }));
+    // baselines are per Lab strategy (two builder structures both run on the leg engine, so the engine is not enough)
+    const who = slugOfResult(lab.result);
+    if (m.isDefault) setBaseline((b) => (b && b.strategy === who && b.dataKey === m.dataKey && b.label !== 'Default rules' ? b
+      : { label: 'Default rules', dataKey: m.dataKey, strategy: who, m: headline(lab.result!), key: m.key }));
   }, [lab.status, lab.result]);
 
   const autoOn = real ? autoPref.real : autoPref.synthetic;
@@ -226,11 +236,11 @@ export function LabClient() {
     return () => mq.removeEventListener('change', on);
   }, []);
 
-  const r0 = lab.result && lab.result.strategy === slug ? lab.result : null;
+  const r0 = lab.result && slugOfResult(lab.result) === slug ? lab.result : null;
   const r = r0 && (real ? !!r0.data : !r0.data) ? r0 : null;
   const stale = !!r && meta?.key !== configKey;
   const busy = lab.status === 'running' || !!loading;
-  const cmp = r && baseline && meta && baseline.strategy === r.strategy && baseline.dataKey === meta.dataKey && baseline.key !== meta.key ? baseline : null;
+  const cmp = r && baseline && meta && baseline.strategy === slug && baseline.dataKey === meta.dataKey && baseline.key !== meta.key ? baseline : null;
   const outcomes = useMemo(() => (r && !stale && r.days ? new Map(r.days.map((d) => [d.date, d])) : undefined), [r, stale]);
 
   const setTab = useCallback((t: TabId) => { setTabState(t); try { history.replaceState(null, '', `#${t}`); } catch { /* ignore */ } }, []);
@@ -252,7 +262,13 @@ export function LabClient() {
     setRail((x) => { const n = x === 'open' ? 'collapsed' : 'open'; try { localStorage.setItem(RAIL_KEY, n); } catch { /* ignore */ } return n; });
   };
   const setAuto = (v: boolean) => setAutoPref((p) => { const n = { ...p, [real ? 'real' : 'synthetic']: v }; try { localStorage.setItem(AUTO_KEY, JSON.stringify(n)); } catch { /* ignore */ } return n; });
-  const pick = (next: StrategySlug) => { setSlug(next); setParams(bySlug(next)!.defaults); if (next === 'ema_pullback') pickSource('real'); setNote(''); setSaveOpen(false); setBeforeLoad(null); };
+  const pick = (next: LabSlug) => {
+    const s = labStrategy(next);
+    if (!s) return;
+    setSlug(s.slug); setParams(s.defaults); if (!s.syntheticOk) pickSource('real');
+    if (s.family === 'builder') lastBuilder.current = s.slug;
+    setNote(''); setSaveOpen(false); setBeforeLoad(null);
+  };
   const resetAll = () => { setParams(strategy.defaults); setBeforeLoad(null); };
   /** Only ever called by the person pressing "Load" in the optimisation lab. */
   const loadFromStudy = (changes: Record<string, unknown>) => { setBeforeLoad(params); setParams((p) => ({ ...p, ...(changes as Params) })); };
@@ -298,16 +314,16 @@ export function LabClient() {
   const seriesName = flag === 'WEEK' ? 'weekly' : 'monthly';
   const periodText = real
     ? (range?.effective && range.runnable.length ? `${shortDate(range.runnable[0])} – ${shortDate(range.runnable[range.runnable.length - 1])} · ${range.runnable.length} sessions` : 'choose dates')
-    : slug === 'fourleg' ? `${params.months} months` : `${params.days} sessions`;
+    : isFourleg ? `${params.months} months` : `${params.days} sessions`;
   const dataErrors = real && !local && avail && avail.state !== 'ready' ? 1 : 0;
   const periodErrors = real && range && !range.runnable.length ? 1 : 0;
   const periodWarn = !!range && (range.counts.partial > 0 || range.counts.missing > 0 || range.messages.some((m) => m.level === 'note' && /moved/.test(m.text)));
   const sectionSummary: Record<SectionId, string> = {
     strategy: [strategy.short, ...inSec('strategy').slice(0, 2).map((f) => short(f, params[f.key]))].join(' · '),
-    data: real ? (local ? `${local.length} files from this computer` : `NSE · NIFTY · ${seriesName} · 1-min`) : slug === 'fourleg' ? 'Synthetic · four stocks' : `Synthetic · seed ${params.seed} · IV ${params.iv}%`,
+    data: real ? (local ? `${local.length} files from this computer` : `NSE · NIFTY · ${seriesName} · 1-min`) : isFourleg ? 'Synthetic · four stocks' : `Synthetic · seed ${params.seed} · IV ${params.iv}%`,
     period: periodText,
-    risk: slug === 'fourleg' ? 'Fixed in this model' : `${inr(Number(params.capital))} · ${params.lots} lot${Number(params.lots) === 1 ? '' : 's'} · ${short(fields.find((f) => f.key === 'margin_policy')!, params.margin_policy)}`,
-    execution: slug === 'fourleg' ? 'Fixed in this model' : `slip ${slip}% · ₹${params.brokerage_per_order}/order`,
+    risk: isFourleg ? 'Fixed in this model' : `${inr(Number(params.capital))} · ${params.lots} lot${Number(params.lots) === 1 ? '' : 's'} · ${short(fields.find((f) => f.key === 'margin_policy')!, params.margin_policy)}`,
+    execution: isFourleg ? 'Fixed in this model' : `slip ${slip}% · ₹${params.brokerage_per_order}/order`,
     advanced: inSec('advanced').length ? (changedIn('advanced') ? `${changedIn('advanced')} changed` : 'Published defaults') : 'None for this strategy',
   };
 
@@ -318,7 +334,7 @@ export function LabClient() {
   const dataNote = real && r?.data && stored?.earliest && stored.latest_any ? `Stored real data runs from ${stored.earliest} to ${stored.latest_any}; this run used ${r.data.days} of those sessions.` : null;
 
   const checks: { ok: 'true' | 'false' | 'warn'; t: React.ReactNode }[] = [];
-  if (!real) checks.push({ ok: 'true', t: slug === 'fourleg' ? `Synthetic model · ${params.months} months, four stocks` : `Synthetic model · ${params.days} sessions, seed ${params.seed}` });
+  if (!real) checks.push({ ok: 'true', t: isFourleg ? `Synthetic model · ${params.months} months, four stocks` : `Synthetic model · ${params.days} sessions, seed ${params.seed}` });
   else if (!local && !avail) checks.push({ ok: 'warn', t: 'Checking which days are stored…' });
   else if (!local && avail?.state === 'off') checks.push({ ok: 'false', t: offMessage(avail.why) });
   else if (!local && avail?.state === 'empty') checks.push({ ok: 'false', t: `No ${seriesName} days are uploaded yet.` });
@@ -328,6 +344,7 @@ export function LabClient() {
     if (range.counts.partial) checks.push({ ok: 'warn', t: `${range.counts.partial} partial day${range.counts.partial === 1 ? '' : 's'} included; gaps stay gaps.` });
   }
   if (real && slip === 0) checks.push({ ok: 'warn', t: 'Zero slippage on real candles overstates results.' });
+  if (strategy.blocked) checks.push({ ok: 'false', t: strategy.blocked });
   if (dataErr) checks.push({ ok: 'false', t: dataErr });
 
   const runLabel = loading ? `Downloading ${loading.done}/${loading.total}` : lab.status === 'running' ? 'Running…' : r && !stale ? 'Run again' : 'Run backtest';
@@ -391,31 +408,53 @@ export function LabClient() {
 
           <Section id="strategy" letter="A" title="Strategy" summary={sectionSummary.strategy} open={open.has('strategy')} onToggle={() => toggleSec('strategy')} changed={changedIn('strategy')} dim={dim('strategy')}>
             <div className="strat-list" role="radiogroup" aria-label="Strategy">
-              {STRATEGIES.map((s) => (
+              {inGroup('published').map((s) => (
                 <label key={s.slug} className="strat-opt">
                   <input type="radio" name="strategy" checked={s.slug === slug} onChange={() => pick(s.slug)} />
-                  <span className="n">{s.number}</span><b>{s.short}</b><small>{s.stance} · {s.slug === 'fourleg' ? 'four stocks, synthetic model only' : 'intraday, NIFTY options in the Lab'}</small>
+                  <span className="n">{s.number}</span><b>{s.short}</b><small>{s.stance} · {s.engine === 'fourleg' ? 'four stocks, synthetic model only' : 'intraday, NIFTY options in the Lab'}</small>
                 </label>
               ))}
+              <label className="strat-opt">
+                <input type="radio" name="strategy" checked={strategy.family === 'builder'} onChange={() => pick(lastBuilder.current)} />
+                <span className="n">B</span><b>Strategy builder</b><small>{CORE_BUILDER.length} structures, single legs to iron condors · NIFTY options</small>
+              </label>
             </div>
-            <div className="sub-h">Legs (fixed for this strategy)</div>
+            {strategy.family === 'builder' && (
+              <div className="f">
+                <div className="f-top">
+                  <label className="f-label" htmlFor="lab-structure">Structure</label>
+                  <Tip label="Structure" text="Every structure runs on the same leg engine: all legs fill at the same bar or none, charges follow the dated tables, and each position is reconciled against the ledger." />
+                </div>
+                <select id="lab-structure" className="in" value={slug} onChange={(e) => pick(e.target.value as LabSlug)}>
+                  {GROUPS.filter((g) => g.id !== 'published').map((g) => (
+                    <optgroup key={g.id} label={g.title}>
+                      {inGroup(g.id).map((s) => <option key={s.slug} value={s.slug} disabled={!!s.blocked}>{s.name}{s.blocked ? ' (needs the next expiry)' : ''}</option>)}
+                    </optgroup>
+                  ))}
+                </select>
+                <div className="f-meta"><span>{strategy.oneLine} {strategy.stance[0].toUpperCase() + strategy.stance.slice(1)}.</span></div>
+              </div>
+            )}
+            <div className="sub-h">{strategy.family === 'builder' ? 'Legs' : 'Legs (fixed for this strategy)'}</div>
             <table className="legs">
-              <thead><tr><th>Action</th><th>Type</th><th>Strike</th><th>Qty</th><th>Expiry</th></tr></thead>
-              <tbody>{LEGS[slug].map((l, i) => <tr key={i}><td>{l.action}</td><td>{l.right}</td><td>{l.strike}</td><td>{l.qty}</td><td>{l.expiry}</td></tr>)}</tbody>
+              <thead><tr><th>Action</th><th>Type</th><th>Strike</th><th>Qty</th><th>Expiry</th>{strategy.family === 'builder' && <th>Stop</th>}</tr></thead>
+              <tbody>{strategy.legs(params).map((l, i) => <tr key={i}><td>{l.action}</td><td>{l.right}</td><td>{l.strike}</td><td>{l.qty}</td><td>{l.expiry}</td>{strategy.family === 'builder' && <td>{l.stop}</td>}</tr>)}</tbody>
             </table>
-            <dl className="ro"><dt>Entry</dt><dd>{ENTRY[slug]}</dd><dt>Exit</dt><dd>{EXIT_TEXT[slug]}</dd></dl>
+            <dl className="ro"><dt>Entry</dt><dd>{strategy.entryText(params)}</dd><dt>Exit</dt><dd>{strategy.exitText(params)}</dd></dl>
             {(['Exit', 'Adjustment', 'Structure'] as const).map((grp) => {
               const fs = inSec('strategy').filter((f) => STRATEGY_GROUP[f.key] === grp);
               return fs.length ? [<div className="sub-h" key={`h${grp}`}>{grp === 'Exit' ? 'Exit rules' : grp === 'Adjustment' ? 'Adjustments' : 'Structure'}</div>, ...fs.map((f) => field(f))] : null;
             })}
-            <p className="sec-note">Full rule text: <Link className="qlink" href={`/strategies/${slug}`}>{strategy.short} rules</Link>. A custom leg builder is not in the Lab yet.</p>
+            {strategy.rulesHref
+              ? <p className="sec-note">Full rule text: <Link className="qlink" href={strategy.rulesHref}>{strategy.short} rules</Link>.</p>
+              : <p className="sec-note">Strikes count listed strikes from ATM (OTM for each leg&rsquo;s own side). Real data stores ATM ± 10, so a leg further out is refused with the reason. Expiry follows the series under Market data.</p>}
           </Section>
 
           <Section id="data" letter="B" title="Market data" summary={sectionSummary.data} open={open.has('data')} onToggle={() => toggleSec('data')} errors={dataErrors} dim={dim('data')}>
             <fieldset className="f" style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
               <div className="f-top"><legend className="f-label" style={{ padding: 0, float: 'left' }}>Source</legend><Tip label="Source" text="The synthetic model is a labelled imaginary market with dates in 2099. Real data is stored Dhan 1-minute NIFTY option and index candles." /></div>
               <div className="seg2">
-                <label><input type="radio" name="source" checked={!real} disabled={slug === 'ema_pullback'} onChange={() => pickSource('synthetic')} /><span>Synthetic model</span></label>
+                <label><input type="radio" name="source" checked={!real} disabled={!strategy.syntheticOk} onChange={() => pickSource('synthetic')} /><span>Synthetic model</span></label>
                 <label><input type="radio" name="source" checked={real} disabled={!realOk} onChange={() => pickSource('real')} /><span>Real NIFTY (Dhan)</span></label>
               </div>
               {!realOk && <div className="f-meta">Real data covers NIFTY index options only, so the four-leg stock strategy stays synthetic.</div>}
@@ -448,7 +487,7 @@ export function LabClient() {
               <>
                 {inSec('data').map((f) => field(f))}
                 <dl className="ro">
-                  <dt>Model</dt><dd>{slug === 'fourleg' ? 'Four imaginary stocks, daily, monthly options' : 'An imaginary NIFTY-like index, 1-minute; realised vol 12%'}</dd>
+                  <dt>Model</dt><dd>{isFourleg ? 'Four imaginary stocks, daily, monthly options' : 'An imaginary NIFTY-like index, 1-minute; realised vol 12%'}</dd>
                   <dt>Dates</dt><dd>in 2099, so they cannot be mistaken for history</dd>
                 </dl>
               </>
@@ -469,7 +508,7 @@ export function LabClient() {
           </Section>
 
           <Section id="risk" letter="D" title="Capital & risk" summary={sectionSummary.risk} open={open.has('risk')} onToggle={() => toggleSec('risk')} changed={changedIn('risk')} dim={dim('risk')}>
-            {slug === 'fourleg' ? <p className="sec-note">The four-leg model sizes three short lots against the protective lots (Strategy) and uses its own synthetic margin. It has no account settings.</p> : (
+            {isFourleg ? <p className="sec-note">The four-leg model sizes three short lots against the protective lots (Strategy) and uses its own synthetic margin. It has no account settings.</p> : (
               <>
                 {inSec('risk').filter((f) => f.key === 'capital' || f.key === 'lots').map((f) => field(f))}
                 <div className="f" data-changed={lotSet}>
@@ -492,7 +531,7 @@ export function LabClient() {
           </Section>
 
           <Section id="execution" letter="E" title="Execution" summary={sectionSummary.execution} open={open.has('execution')} onToggle={() => toggleSec('execution')} changed={changedIn('execution')} warns={real && slip === 0 ? 1 : 0} dim={dim('execution')}>
-            {slug === 'fourleg' ? <p className="sec-note">This model charges ₹20 an order plus statutory charges at fixed rates inside the model. It has no execution settings.</p> : (
+            {isFourleg ? <p className="sec-note">This model charges ₹20 an order plus statutory charges at fixed rates inside the model. It has no execution settings.</p> : (
               <>
                 {inSec('execution').map((f) => field(f, f.key === 'slip_pct' && real && slip === 0 ? 'Zero slippage on real candles overstates results.' : null))}
                 <dl className="ro">
@@ -536,7 +575,7 @@ export function LabClient() {
             <div className="ws-notice" data-kind="real" role="note">
               <span className="stamp2">Real data</span>
               <span>NIFTY 1-minute option candles from Dhan{r?.data ? `, ${shortDate(r.data.from)} to ${shortDate(r.data.to)} (${r.data.days} sessions)` : ''}. <b>Fills are candle prices plus {slip}% slippage, so they are optimistic.</b></span>
-              {slug !== 'ema_pullback' && <button type="button" className="qlink" onClick={() => pickSource('synthetic')}>Use synthetic</button>}
+              {strategy.syntheticOk && <button type="button" className="qlink" onClick={() => pickSource('synthetic')}>Use synthetic</button>}
               <details><summary>What this assumes</summary>
                 <p>There is no bid/ask history, so a real order could fill worse, especially on stops. Expiry dates follow the weekday rule and lot size {r?.data ? r.data.lot_sizes.join('/') : ''} is {r?.data?.lot_source.startsWith('set') ? 'set by you' : 'taken from the day files'} until checked against NSE bhavcopy. Margin is an estimate. Not investment advice.</p>
               </details>
@@ -562,7 +601,7 @@ export function LabClient() {
               <span className="lbl">Nothing to run yet</span>
               <h2>{!local && !avail ? 'Checking which days are stored' : 'No real days to run'}</h2>
               <p>{!local && avail?.state === 'off' ? offMessage(avail.why) : !local && avail?.state === 'empty' ? `No ${seriesName} days are uploaded yet.` : range?.messages.find((m) => m.level === 'error')?.text ?? 'Pick a period with stored days, or load day files from this computer.'}</p>
-              {(local || avail) && <div className="run-actions">{(local || avail?.state === 'ready') && <button type="button" className="qbtn" onClick={() => showSec('period')}>Open the calendar</button>}{slug !== 'ema_pullback' && <button type="button" className="qbtn" onClick={() => pickSource('synthetic')}>Use the synthetic model</button>}</div>}
+              {(local || avail) && <div className="run-actions">{(local || avail?.state === 'ready') && <button type="button" className="qbtn" onClick={() => showSec('period')}>Open the calendar</button>}{strategy.syntheticOk && <button type="button" className="qbtn" onClick={() => pickSource('synthetic')}>Use the synthetic model</button>}</div>}
             </div>
           ) : !r ? (
             busy || (autoOn && canRun) ? (
@@ -586,14 +625,14 @@ export function LabClient() {
                 <div style={{ minWidth: 0 }}>
                   <h1>{strategy.name}</h1>
                   <div className="run-ctx">
-                    <span>{r.data ? <>Real NIFTY {seriesName} · <b>{shortDate(r.data.from)} – {shortDate(r.data.to)}</b> · {r.data.days} sessions</> : slug === 'fourleg' ? <>Synthetic · <b>{params.months} months</b></> : <>Synthetic · <b>{r.sessions} sessions</b> · seed {String(params.seed)}</>}</span>
+                    <span>{r.data ? <>Real NIFTY {seriesName} · <b>{shortDate(r.data.from)} – {shortDate(r.data.to)}</b> · {r.data.days} sessions</> : isFourleg ? <>Synthetic · <b>{params.months} months</b></> : <>Synthetic · <b>{r.sessions} sessions</b> · seed {String(params.seed)}</>}</span>
                     <span>{nChanged ? `${nChanged} changed from defaults` : 'Default rules'}</span>
                     {cmp && <span>Compared with <b>{cmp.label}</b> · <button type="button" className="qlink" onClick={() => setBaseline(null)}>clear</button></span>}
                     {r.account?.report.generated.run_hash && <span title="Run fingerprint: the same settings and data give the same hash">Run {r.account.report.generated.run_hash.slice(0, 8)}</span>}
                   </div>
                 </div>
                 <div className="run-actions">
-                  <button type="button" className="qbtn" aria-pressed={!!baseline && baseline.key === meta?.key} onClick={() => meta && setBaseline({ label: 'Pinned run', dataKey: meta.dataKey, strategy: r.strategy, m: headline(r), key: meta.key })}>
+                  <button type="button" className="qbtn" aria-pressed={!!baseline && baseline.key === meta?.key} onClick={() => meta && setBaseline({ label: 'Pinned run', dataKey: meta.dataKey, strategy: slug, m: headline(r), key: meta.key })}>
                     {baseline && baseline.key === meta?.key ? 'Baseline' : 'Pin as baseline'}
                   </button>
                   {r.account && <button type="button" className="qbtn" onClick={() => setTab('ledger')}>Export CSV</button>}

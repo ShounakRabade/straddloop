@@ -66,6 +66,7 @@ export function Tip({ label, text, def }: { label: string; text: string; def?: s
 const fmtVal = (f: Field, v: unknown) => {
   if (f.kind === 'choice') return f.options.find((o) => o.value === v)?.label ?? String(v);
   const n = Number(v);
+  if (f.zeroOff && n === 0) return 'Off';
   return `${f.prefix ?? ''}${f.prefix ? n.toLocaleString('en-IN') : n}${f.unit ?? ''}`;
 };
 

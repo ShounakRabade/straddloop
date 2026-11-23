@@ -1,7 +1,8 @@
 import type { Params, StrategySlug } from './types';
 
 export type Field =
-  | { key: string; label: string; help: string; kind: 'range'; min: number; max: number; step: number; unit?: string; prefix?: string }
+  /** zeroOff: 0 means the rule is off, and reads "Off". */
+  | { key: string; label: string; help: string; kind: 'range'; min: number; max: number; step: number; unit?: string; prefix?: string; zeroOff?: boolean }
   | { key: string; label: string; help: string; kind: 'choice'; options: { value: string | number | boolean; label: string }[] };
 
 export interface Strategy {
@@ -243,12 +244,13 @@ export const STRATEGIES: Strategy[] = [
 
 export const bySlug = (slug: string) => STRATEGIES.find((s) => s.slug === slug);
 
-export function describeParams(s: Strategy, params: Params): string[] {
+export function describeParams(s: { fields: Field[]; defaults: Params }, params: Params): string[] {
   return s.fields
     .filter((f) => params[f.key] !== undefined && params[f.key] !== s.defaults[f.key])
     .map((f) => {
       const v = params[f.key];
       if (f.kind === 'choice') return `${f.label}: ${f.options.find((o) => o.value === v)?.label ?? v}`;
+      if (f.zeroOff && Number(v) === 0) return `${f.label}: off`;
       return `${f.label}: ${f.prefix ?? ''}${v}${f.unit ?? ''}`;
     });
 }

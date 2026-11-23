@@ -4,7 +4,8 @@ import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { Button, ButtonLink, hard } from '@/components/ui';
 import { Sparkline } from '@/components/charts';
-import { bySlug, describeParams } from '@/lib/strategies';
+import { describeParams } from '@/lib/strategies';
+import { labStrategy } from '@/lib/strategyRegistry';
 import { deleteRun, listRuns } from '@/lib/store';
 import { cloudEnabled } from '@/lib/supabase';
 import { useSession } from '@/lib/useSession';
@@ -62,7 +63,7 @@ export function Notebook() {
         {runs && runs.length > 0 && (
           <ul className="runs">
             {runs.map((run) => {
-              const s = bySlug(run.strategy);
+              const s = labStrategy(run.strategy);
               if (!s) return null;
               const changed = describeParams(s, run.params), m = run.summary;
               return (

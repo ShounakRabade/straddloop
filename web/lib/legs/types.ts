@@ -19,8 +19,11 @@ export type StrikeRule =
   | { by: 'delta'; delta: number }
   | { by: 'leg'; leg: string; steps: number };
 
-export interface LegLevel { kind: 'pct' | 'points'; value: number }
-export interface MoneyLevel { kind: 'rupees_per_lot' | 'pct_premium'; value: number }
+/** A per-leg stop or target: % of the leg's entry price, premium points, ₹ on the leg's whole quantity, or ₹ per lot
+ *  of the leg. ₹ levels are converted to premium points at entry (₹ ÷ quantity, or ₹ per lot ÷ lot size). */
+export interface LegLevel { kind: 'pct' | 'points' | 'rupees' | 'rupees_per_lot'; value: number }
+/** A position stop or target on mark-to-market P&L: ₹ per base lot, % of the net entry premium, or ₹ in total. */
+export interface MoneyLevel { kind: 'rupees_per_lot' | 'pct_premium' | 'rupees'; value: number }
 
 export interface LegSpec {
   id: string;
@@ -40,7 +43,14 @@ export type Condition =
   | { kind: 'move_pct'; min?: number; max?: number }
   | { kind: 'net_premium'; min?: number; max?: number };
 
-export interface EntryRule { time: string; weekdays: number[]; dte?: { min?: number; max?: number }; conditions: Condition[] }
+export interface EntryRule {
+  time: string; weekdays: number[]; dte?: { min?: number; max?: number }; conditions: Condition[];
+  /** Positions that may open in one session, one at a time (default 1). After one closes, the next opens on the
+   *  first bar at or after its close + 1 minute + cooldown_min where every rule passes, before adjust.cutoff. */
+  max_entries?: number;
+  /** Minutes to wait after a position closes before the next may open (default 0). */
+  cooldown_min?: number;
+}
 export interface ExitRule {
   hold: 'intraday' | 'sessions' | 'expiry';
   sessions?: number;

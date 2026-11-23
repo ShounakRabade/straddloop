@@ -81,7 +81,18 @@
     const stt = action === 'SELL' ? turnover * r.stt_sell_pct / 100 : 0;
     const stamp = action === 'BUY' ? turnover * r.stamp_buy_pct / 100 : 0;
     const gst = (brokerage + exchange + sebi) * r.gst_pct / 100;
-    return { brokerage, stt, exchange, gst, sebi, stamp, total: brokerage + stt + exchange + gst + sebi + stamp, schedule: r.id, verified: r.verified };
+    return { brokerage, stt, exchange, gst, sebi, stamp, total: chargeTotal(r, action, px, qty, brokeragePerOrder), schedule: r.id, verified: r.verified };
+  }
+  /** chargesFor(...).total from rates already looked up (r = ratesFor(date)), without building the breakdown.
+   *  The leg engine marks every open leg at every bar net of the charges to close it; this keeps that cheap. */
+  function chargeTotal(r, action, px, qty, brokeragePerOrder) {
+    const turnover = px * qty, brokerage = brokeragePerOrder;
+    const exchange = turnover * r.exch_pct / 100;
+    const sebi = turnover * r.sebi_pct / 100;
+    const stt = action === 'SELL' ? turnover * r.stt_sell_pct / 100 : 0;
+    const stamp = action === 'BUY' ? turnover * r.stamp_buy_pct / 100 : 0;
+    const gst = (brokerage + exchange + sebi) * r.gst_pct / 100;
+    return brokerage + stt + exchange + gst + sebi + stamp;
   }
 
   /**
@@ -241,7 +252,10 @@
       const hadCarry = legs.size > 0;
       let dayMargin = 0, dayHeld = 0;
       const open = () => [...legs.values()].filter(l => l.open);
-      const blocked = () => { let m = 0, h = 0, e = 0, u = 0; const ol = open(); for (const l of ol) { m += l.margin; h += l.held; e += l.notional; u += l.dir < 0 ? (l.entry_px - l.last_px) * l.qty : (l.last_px - l.entry_px) * l.qty; } if (acct.margin_model === 'hedged') m = hedgedMargin(ol, acct); return { m, h, e, u }; };
+      // The hedged margin depends only on which legs are open (strike, qty, side, entry spot), so it is computed once
+      // per change of the open set instead of at every one-minute mark. book() clears it whenever a leg opens or closes.
+      let hedged = null;
+      const blocked = () => { let m = 0, h = 0, e = 0, u = 0; const ol = open(); for (const l of ol) { m += l.margin; h += l.held; e += l.notional; u += l.dir < 0 ? (l.entry_px - l.last_px) * l.qty : (l.last_px - l.entry_px) * l.qty; } if (acct.margin_model === 'hedged') { if (hedged == null) hedged = hedgedMargin(ol, acct); m = hedged; } return { m, h, e, u }; };
       /** Extra margin a new leg needs on top of what the open legs already block (per_leg: its own margin). */
       const marginInc = (dir, strike, qty, side, spot) => {
         if (acct.margin_model !== 'hedged') return marginFor(dir, strike, qty, acct);
@@ -278,10 +292,12 @@
             notional: f.strike * qty, open: true, date: res.date, entry_reason: f.reason, kind: f.kind, rowIdx: fills.length, seqs: [], rows: [], intrabar_in: !!f.intrabar, last_px: px,
             balance_before: balBefore, avail_before: availBefore, margin_req: marginReq, spot: f.spot, position: f.position || '' };
           legs.set(f.legId, leg);
+          hedged = null;
           if (dir > 0) S.totalPremiumPaid += turnover; else S.totalPremiumReceived += turnover;
           if (S.firstMargin == null && marginReq > 0) S.firstMargin = marginReq;
         } else {
           leg.exit_t = f.t; leg.exit_date = res.date; leg.exit_px = px; leg.exit_reason = f.reason; leg.exit_ch = ch; leg.intrabar_out = !!f.intrabar; leg.open = false; leg.last_px = px;
+          hedged = null;
           realised = leg.dir < 0 ? (leg.entry_px - px) * qty : (px - leg.entry_px) * qty;
           leg.gross = realised;
         }
@@ -616,6 +632,6 @@
     return rows.map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
   }
 
-  return { COST_TABLE, COST_TABLE_VERSION, ACCOUNT_DEFAULTS, POLICIES, POLICY_TEXT, MARGIN_MODELS, makeAccount, ratesFor, ratesHook, chargesFor, settlementCharges, marginFor, hedgedMargin, runLedger, toCsv, performanceCsv,
+  return { COST_TABLE, COST_TABLE_VERSION, ACCOUNT_DEFAULTS, POLICIES, POLICY_TEXT, MARGIN_MODELS, makeAccount, ratesFor, ratesHook, chargesFor, chargeTotal, settlementCharges, marginFor, hedgedMargin, runLedger, toCsv, performanceCsv,
     TRADEBOOK_COLS, FILL_COLS, DAILY_COLS, hashStr };
 });

@@ -252,21 +252,27 @@
     };
   }
 
+  /** The spec and account a leg-engine run uses. The account owns brokerage, so the engine's cost lines use the same
+   *  figure and the two reconcile; the leg engine's margin defaults to the hedged estimate. */
+  function legsSetup(p) {
+    if (!G) throw new Error('The leg engine is not loaded.');
+    const raw = typeof p.spec === 'string' ? JSON.parse(p.spec) : p.spec;
+    if (!raw) throw new Error('No strategy spec was given.');
+    const spec = G.normalize(raw);
+    if (p.brokerage_per_order !== undefined && p.brokerage_per_order !== '') spec.execution.brokerage_per_order = Number(p.brokerage_per_order);
+    const acct = Object.assign({ margin_model: 'hedged' }, accountOf(p), { brokerage_per_order: spec.execution.brokerage_per_order, exercise_stt_pct: spec.execution.exercise_stt_pct });
+    return { spec, acct };
+  }
+
   /**
    * The leg engine (docs/ENGINE_INTERFACES.md): any strategy as a StrategySpec in p.spec. Headline figures are per
    * POSITION (the legs opened together), taken from the ledger's tradebook grouped by position.
    */
   function legsStrategy(p, sessions) {
-    if (!G) throw new Error('The leg engine is not loaded.');
-    const raw = typeof p.spec === 'string' ? JSON.parse(p.spec) : p.spec;
-    if (!raw) throw new Error('No strategy spec was given.');
-    const spec = G.normalize(raw);
-    // The account owns brokerage; the engine's cost lines must use the same figure so the two reconcile.
-    if (p.brokerage_per_order !== undefined && p.brokerage_per_order !== '') spec.execution.brokerage_per_order = Number(p.brokerage_per_order);
+    const { spec, acct } = legsSetup(p);
     const sess = sessions || calendar(p);
     const run = G.run(sess, spec, { L, caps: G.capsOf(sess) });
     last = { strategy: 'legs', results: run.results, cfg: { or_minutes: 30, candle_minutes: 5 }, positions: run.positions, sessions: sess, params: p };
-    const acct = Object.assign({ margin_model: 'hedged' }, accountOf(p), { brokerage_per_order: spec.execution.brokerage_per_order, exercise_stt_pct: spec.execution.exercise_stt_pct });
     const exits = {};
     run.positions.forEach(x => { exits[x.exit_reason] = (exits[x.exit_reason] || 0) + 1; });
     const head = withLedger('legs', run.results, run.config_hash, p, sessions, {
@@ -360,12 +366,19 @@
    */
   function evaluate(p, sessions) {
     const sess = sessions || calendar(p);
-    let results;
+    let results, acct = accountOf(p);
     if (p.strategy === 'straddle') results = E.runBacktest(sess, straddleCfg(p)).results;
     else if (p.strategy === 'orb') results = E.ORB.run(sess, orbCfg(p)).results;
     else if (p.strategy === 'ema_pullback') results = E.EMA.run(sess, E.EMA.makeConfig(Object.assign({}, common(p), extras('ema_pullback', p)))).results;
-    else throw new Error('Research tools cover the intraday NIFTY strategies only.');
-    const led = L.runLedger(results, accountOf(p), { symbol: sess[0] ? sess[0].symbol : 'NIFTY' });
+    else if (p.strategy === 'legs') {
+      // lean: the same fills and ledger as a Lab run, without the replay text (tests/legs.test.mts checks they agree).
+      // cost_mult is applied after booking (stressDaily below); the engine's own net-basis exits are not re-decided.
+      const su = legsSetup(p);
+      acct = su.acct;
+      results = G.run(sess, su.spec, { L, caps: G.capsOf(sess), lean: true }).results;
+    }
+    else throw new Error('Research tools cover the intraday NIFTY strategies and the strategy builder only.');
+    const led = L.runLedger(results, acct, { symbol: sess[0] ? sess[0].symbol : 'NIFTY' });
     const mult = Number(p.cost_mult) || 1;
     const daily = mult !== 1 ? stressDaily(led, mult) : led.daily;
     return { account: { daily, config: led.acct }, results: results.map(slimResult) };

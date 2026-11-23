@@ -1,6 +1,8 @@
-import type { Gate, PositionRecord, StrategySpec } from './legs/types';
+import type { Gate, PositionRecord, StrategySpec, TemplateId } from './legs/types';
 
 export type StrategySlug = 'straddle' | 'orb' | 'fourleg' | 'ema_pullback';
+/** Any strategy the Lab can run: a published rule set, or a strategy-builder structure (lib/strategyRegistry.ts). */
+export type LabSlug = StrategySlug | TemplateId;
 export type Focus = 'index' | 'stocks' | 'exploring';
 export type Params = Record<string, string | number | boolean>;
 
@@ -71,7 +73,7 @@ export interface RunSummary {
 
 export interface SavedRun {
   id: string;
-  strategy: StrategySlug;
+  strategy: LabSlug;
   params: Params;
   summary: RunSummary;
   note: string;

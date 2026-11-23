@@ -37,10 +37,12 @@ const NA = <span className="na">—</span>;
 /** Headline numbers used by the executive header and by baseline comparison. */
 export function headline(r: RunResult): Record<string, number | null> {
   const rep = r.account?.report;
+  // a leg-engine run counts positions (the legs opened together); the ledger report counts closed legs
+  const pos = r.unit === 'position';
   return {
     net: r.net, pct_initial: rep ? n(rep.returns.pct_initial) : null, cagr: rep ? n(rep.returns.cagr_pct) : null,
-    trades: rep ? n(rep.performance.closed_positions) : r.traded, win_rate: rep ? n(rep.performance.win_rate_pct) : r.winRate,
-    pf: rep ? n(rep.performance.profit_factor) : r.profitFactor, max_dd: rep ? n(rep.risk.max_drawdown) : Math.abs(r.maxDD),
+    trades: rep && !pos ? n(rep.performance.closed_positions) : r.traded, win_rate: rep && !pos ? n(rep.performance.win_rate_pct) : r.winRate,
+    pf: rep && !pos ? n(rep.performance.profit_factor) : r.profitFactor, max_dd: rep ? n(rep.risk.max_drawdown) : Math.abs(r.maxDD),
     sharpe: rep ? n(rep.risk.sharpe) : null, sortino: rep ? n(rep.risk.sortino) : null, rpm: rep ? n(rep.returns.pct_peak_margin) : null,
   };
 }
@@ -98,7 +100,7 @@ export function Exec({ r, busy, baseline }: { r: RunResult; busy: boolean; basel
       </div>
     );
   }
-  const pf = rep.performance, rk = rep.risk, rt = rep.returns, c = rep.capital;
+  const pf = rep.performance, rk = rep.risk, rt = rep.returns, c = rep.capital, pos = r.unit === 'position';
   const dd = n(rk.max_drawdown) ?? 0;
   return (
     <div className="exec" data-busy={busy} aria-label="Headline results">
@@ -116,12 +118,12 @@ export function Exec({ r, busy, baseline }: { r: RunResult; busy: boolean; basel
       <Metric k="pct_initial" label="Net return" tip={GLOSSARY.net_return} def={rep.defs.ret_initial} value={signedPct(h.pct_initial)} cls={tone(h.pct_initial)}
         sub={`of ${inr(Number(c.initial_capital))} capital`} delta={deltaOf('pct_initial', h.pct_initial, baseline, (v) => signedPct(v))} />
       <Metric k="cagr" label="CAGR" tip={GLOSSARY.cagr} def={rep.defs.cagr} value={h.cagr == null ? NA : signedPct(h.cagr)} cls={tone(h.cagr)} sub={h.cagr == null ? (rt.cagr_note ?? 'not shown') : 'annualised'} />
-      <Metric k="trades" label="Trades" tip={GLOSSARY.trades} value={h.trades ?? NA}
-        sub={r.unit === 'day' ? `${r.traded} traded day${r.traded === 1 ? '' : 's'} of ${r.sessions}` : `in ${r.sessions} sessions`} delta={deltaOf('trades', h.trades, baseline, (v) => String(v))} />
+      <Metric k="trades" label={pos ? 'Positions' : 'Trades'} tip={pos ? 'Positions opened and closed: the legs opened together count once. The tradebook lists every leg on its own row.' : GLOSSARY.trades} value={h.trades ?? NA}
+        sub={r.unit === 'day' ? `${r.traded} traded day${r.traded === 1 ? '' : 's'} of ${r.sessions}` : pos ? `${pf.closed_positions} legs in ${r.sessions} sessions` : `in ${r.sessions} sessions`} delta={deltaOf('trades', h.trades, baseline, (v) => String(v))} />
       <Metric k="win_rate" label="Win rate" tip={GLOSSARY.win_rate} def={rep.defs.win_rate} value={h.win_rate == null ? NA : pct2(h.win_rate, 1)}
-        sub={`${pf.wins} of ${pf.closed_positions} legs${r.unit === 'day' && r.traded ? ` · ${r.winRate.toFixed(0)}% of days` : ''}`} delta={deltaOf('win_rate', h.win_rate, baseline, (v) => `${v.toFixed(1)}%`)} />
+        sub={pos ? `${Math.round(r.winRate * r.traded / 100)} of ${r.traded} positions · ${n(pf.win_rate_pct)?.toFixed(0) ?? '–'}% of legs` : `${pf.wins} of ${pf.closed_positions} legs${r.unit === 'day' && r.traded ? ` · ${r.winRate.toFixed(0)}% of days` : ''}`} delta={deltaOf('win_rate', h.win_rate, baseline, (v) => `${v.toFixed(1)}%`)} />
       <Metric k="pf" label="Profit factor" tip={GLOSSARY.profit_factor} def={rep.defs.profit_factor} value={h.pf == null ? NA : num2(h.pf)}
-        sub={h.pf == null ? (Number(pf.losses) === 0 ? 'no losing legs' : 'not defined') : 'winners ÷ losers'} delta={deltaOf('pf', h.pf, baseline, (v) => v.toFixed(2))} />
+        sub={pos ? (h.pf == null ? 'no losing positions, or none closed' : 'winning ÷ losing positions') : h.pf == null ? (Number(pf.losses) === 0 ? 'no losing legs' : 'not defined') : 'winners ÷ losers'} delta={deltaOf('pf', h.pf, baseline, (v) => v.toFixed(2))} />
       <Metric k="max_dd" label="Max drawdown" tip={GLOSSARY.max_dd} def={rep.defs.max_dd} value={dd > 0 ? `−${inr(dd)}` : '₹0'} cls={dd > 0 ? 'loss' : ''}
         sub={dd > 0 ? `${pct2(n(rk.max_drawdown_pct))} of peak balance` : 'never below a previous peak'} delta={deltaOf('max_dd', h.max_dd, baseline, (v) => inr(v))} />
       <Metric k="sharpe" label="Sharpe" tip={GLOSSARY.sharpe} def={rep.defs.sharpe} value={h.sharpe == null ? NA : num2(h.sharpe)} sub={rk.sharpe_note ? String(rk.sharpe_note) : `${rk.sessions_in_ratio} daily returns`} delta={deltaOf('sharpe', h.sharpe, baseline, (v) => v.toFixed(2))} />

@@ -478,3 +478,150 @@ test('Strategy 01 as a leg spec agrees with the straddle engine fill for fill (r
     assert.ok(traded > days / 3, `only ${traded} traded days`);
   }
 });
+
+// ------------------------------------------------------------------ iron butterfly, ₹ levels, trades per session, lean runs
+
+test('iron butterfly: wings bought first, body bought back first; P&L, payoff and hedged margin by hand', () => {
+  // sell CE and PE 25,000, buy CE 25,100 and PE 24,900 (width 2 strikes of 50)
+  const s = [day(D1, { 'CE:25000': step(100, 120), 'PE:25000': step(100, 70), 'CE:25100': step(80, 95), 'PE:24900': step(80, 60) })];
+  const sp = specFromTemplate('iron_butterfly', {}, { execution: NOSLIP } as any);
+  const run = runLegs(s, sp);
+  assert.deepEqual(fillsOf(run.results[0]), [
+    [hm('09:20'), 'BUY', 'CE', 25100, 75, 80, 'entry'], [hm('09:20'), 'BUY', 'PE', 24900, 75, 80, 'entry'],
+    [hm('09:20'), 'SELL', 'CE', 25000, 75, 100, 'entry'], [hm('09:20'), 'SELL', 'PE', 25000, 75, 100, 'entry'],
+    [hm('15:15'), 'BUY', 'CE', 25000, 75, 120, 'time'], [hm('15:15'), 'BUY', 'PE', 25000, 75, 70, 'time'],
+    [hm('15:15'), 'SELL', 'CE', 25100, 75, 95, 'time'], [hm('15:15'), 'SELL', 'PE', 24900, 75, 60, 'time']]);
+  const p = run.positions[0];
+  // short CE (100 - 120) x 75 = -1,500; short PE (100 - 70) x 75 = 2,250; long CE (95 - 80) x 75 = 1,125;
+  // long PE (60 - 80) x 75 = -1,500; total 375
+  near(p.gross, 375, 1e-9);
+  const ch = charges('SELL', 100, 75) * 2 + charges('BUY', 80, 75) * 2 + charges('BUY', 120, 75) + charges('BUY', 70, 75) + charges('SELL', 95, 75) + charges('SELL', 60, 75);
+  near(p.charges, ch, 1e-6);
+  near(p.net, 375 - ch, 1e-6);
+  assert.equal(p.entry_premium, 40); // 100 + 100 - 80 - 80
+  // credit 40 x 75 = 3,000 at 25,000; worst (100 - 40) x 75 = 4,500 beyond either wing; breakevens 25,000 -/+ 40
+  assert.deepEqual(p.payoff, { max_profit: 3000, max_loss: -4500, breakevens: [24960, 25040] });
+  // hedged margin: worst intrinsic loss beyond a wing 100 x 75 = 7,500, plus 2% x 25,000 x 150 short qty = 75,000
+  const r = lab(s, sp);
+  near(r.account.daily[0].peak_margin, 82500, 0.01);
+  near(r.net, p.net, 0.01);
+  reconciles(r, 1);
+});
+
+test('₹ leg levels: ₹ on the leg and ₹ per lot become premium points at entry, rounded against you', () => {
+  const at11 = (bar: any) => (t: number) => (t === hm('11:00') ? bar : 100);
+  const s = [day(D1, { 'CE:25000': at11({ o: 110, h: 125, l: 105, c: 112 }) })];
+  const short = (stop: any, lots = 1) => spec([leg('L1', 'SELL', 'CE', atm(0), { stop })], { lots });
+  // ₹1,500 on 75 units = 20 points: stop 120, touched at 11:00 (high 125, open 110), filled at 120; the loss is ₹1,500
+  const a = runLegs(s, short({ kind: 'rupees', value: 1500 }));
+  assert.equal(a.results[0].fills[0].stop, 120);
+  assert.deepEqual([a.results[0].fills[1].reason, a.results[0].fills[1].px], ['leg_stop', 120]);
+  near(a.positions[0].gross, -1500, 1e-9);
+  // the same ₹1,500 on 2 lots (150 units) is 10 points: stop 110, and the 11:00 bar opens at it
+  const b = runLegs(s, short({ kind: 'rupees', value: 1500 }, 2));
+  assert.equal(b.results[0].fills[0].stop, 110);
+  near(b.positions[0].gross, -1500, 1e-9);
+  // ₹1,500 per lot on 2 lots = 20 points again; the loss is ₹1,500 x 2 lots
+  const c = runLegs(s, short({ kind: 'rupees_per_lot', value: 1500 }, 2));
+  assert.equal(c.results[0].fills[0].stop, 120);
+  near(c.positions[0].gross, -3000, 1e-9);
+  // ₹1,000 on 75 units = 13.33 points: a short leg's stop rounds UP to the tick, 113.35
+  assert.equal(runLegs(s, short({ kind: 'rupees', value: 1000 })).results[0].fills[0].stop, 113.35);
+  // a long leg: ₹3,000 stop = 40 points below (60); ₹750 per lot target = 10 points above (110), hit at 11:00
+  const l = runLegs(s, spec([leg('L1', 'BUY', 'CE', atm(0), { stop: { kind: 'rupees', value: 3000 }, target: { kind: 'rupees_per_lot', value: 750 } })]));
+  assert.equal(l.results[0].fills[0].stop, 60);
+  assert.deepEqual(fillsOf(l.results[0])[1], [hm('11:00'), 'SELL', 'CE', 25000, 75, 110, 'leg_target']);
+  // not positive, or an unknown unit: refused before anything runs
+  for (const bad of [{ kind: 'rupees', value: 0 }, { kind: 'rupees_per_lot', value: -5 }, { kind: 'lakhs', value: 1 }]) {
+    assert.ok(G.validate(short(bad)).errors.some((g: any) => /stop must be a positive/.test(g.message)), JSON.stringify(bad));
+  }
+});
+
+test('₹ position levels: a total ₹ target does not scale with lots; ₹ per lot does', () => {
+  // both legs of a 2-lot straddle fall from 100 to 92 at 10:00: gross (8 + 8) x 150 = 2,400, net of charges ~2,250
+  const s = [day(D1, { 'CE:25000': step(100, 92, '10:00'), 'PE:25000': step(100, 92, '10:00') })];
+  const sp = (target: any) => specFromTemplate('short_straddle', { lots: 2 }, { exit: { hold: 'intraday', time: '15:15', settle_at_expiry: true, basis: 'net', target }, execution: NOSLIP } as any);
+  const net = 2400 - 2 * charges('SELL', 100, 150) - 2 * charges('BUY', 92, 150);
+  assert.ok(net > 2200 && net < 2300, String(net));
+  const reason = (target: any) => runLegs(s, sp(target)).positions[0].exit_reason;
+  assert.equal(reason({ kind: 'rupees', value: 2000 }), 'target');           // ₹2,000 in total
+  assert.equal(reason({ kind: 'rupees', value: 2400 }), 'time');             // more than the ~₹2,250 there is
+  assert.equal(reason({ kind: 'rupees_per_lot', value: 1000 }), 'target');   // ₹1,000 x 2 lots = ₹2,000
+  assert.equal(reason({ kind: 'rupees_per_lot', value: 1200 }), 'time');     // ₹2,400
+  assert.ok(G.validate(sp({ kind: 'rupees', value: 0 })).errors.some((g: any) => /Position target must be a positive/.test(g.message)));
+});
+
+test('trades per session: after a close, the next position opens on the next eligible bar; never two at once, never twice', () => {
+  // CE and PE at 100, both fall to 90 at 10:00 and to 80 at 12:00. A ₹1,000 per lot net target closes the first
+  // straddle at the 10:01 open (90), and a second one sold at 90 at the 12:01 open (80).
+  const px = (t: number) => (t < hm('10:00') ? 100 : t < hm('12:00') ? 90 : 80);
+  const s = [day(D1, { 'CE:25000': px, 'PE:25000': px })];
+  const sp = (entry: any = {}, adjust: any = {}, conditions: any[] = []) => specFromTemplate('short_straddle', {}, {
+    entry: { time: '09:20', weekdays: [0, 1, 2, 3, 4], conditions, ...entry }, adjust: { on_leg_stop: 'keep_others', max_reentries: 0, cutoff: '14:30', ...adjust },
+    exit: { hold: 'intraday', time: '15:15', settle_at_expiry: true, basis: 'net', target: { kind: 'rupees_per_lot', value: 1000 } }, execution: NOSLIP } as any);
+  const opened = (r: any) => r.positions.map((p: any) => [p.opened.t, p.exit_reason]);
+  // one entry a session (the default): unchanged, and an explicit 1 is the same spec
+  const one = runLegs(s, sp());
+  assert.deepEqual(opened(one), [[hm('09:20'), 'target']]);
+  assert.equal(one.results[0].fills.length, 4);
+  assert.equal(G.normalize(sp({ max_entries: 1, cooldown_min: 0 })).entry.max_entries, undefined);
+  assert.equal(runLegs(s, sp({ max_entries: 1 })).config_hash, one.config_hash);
+  // two: the second is decided on the 10:01 close and sold at the 10:02 open (90); it reaches its target at 12:00
+  const two = runLegs(s, sp({ max_entries: 2 }));
+  assert.deepEqual(opened(two), [[hm('09:20'), 'target'], [hm('10:02'), 'target']]);
+  assert.deepEqual(fillsOf(two.results[0]).slice(4), [
+    [hm('10:02'), 'SELL', 'CE', 25000, 75, 90, 'entry'], [hm('10:02'), 'SELL', 'PE', 25000, 75, 90, 'entry'],
+    [hm('12:01'), 'BUY', 'CE', 25000, 75, 80, 'target'], [hm('12:01'), 'BUY', 'PE', 25000, 75, 80, 'target']]);
+  // three: a third at 12:02, held to the exit time (no further move)
+  const three = runLegs(s, sp({ max_entries: 3 }));
+  assert.deepEqual(opened(three), [[hm('09:20'), 'target'], [hm('10:02'), 'target'], [hm('12:02'), 'time']]);
+  // every leg id opens once and closes once; positions never overlap in time
+  const byLeg = new Map<string, string[]>();
+  for (const f of three.results[0].fills) byLeg.set(f.leg, [...(byLeg.get(f.leg) ?? []), f.reason === 'entry' ? 'open' : 'close']);
+  assert.equal(byLeg.size, 6);
+  for (const [id, seq] of byLeg) assert.deepEqual(seq, ['open', 'close'], id);
+  const spans = three.positions.map((p: any) => [p.opened.t, p.closed.t]);
+  for (let i = 1; i < spans.length; i++) assert.ok(spans[i][0] > spans[i - 1][1], JSON.stringify(spans));
+  // a 30-minute cooldown: 10:01 + 1 + 30 = 10:32
+  assert.equal(runLegs(s, sp({ max_entries: 2, cooldown_min: 30 })).positions[1].opened.t, hm('10:32'));
+  // the cutoff: nothing opens at or after it (10:02 is the first possible minute)
+  assert.equal(runLegs(s, sp({ max_entries: 2 }, { cutoff: '10:02' })).positions.length, 1);
+  assert.equal(runLegs(s, sp({ max_entries: 2 }, { cutoff: '10:03' })).positions[1].opened.t, hm('10:02'));
+  // with the opening-range condition, a later entry waits for the 5-minute candle grid: 10:02 -> 10:05
+  const orc = runLegs(s, sp({ time: '09:50', max_entries: 2 }, {}, [{ kind: 'or_inside', or_minutes: 30, candle_minutes: 5, mode: 'full' }]));
+  assert.deepEqual(orc.positions.map((p: any) => p.opened.t), [hm('09:50'), hm('10:05')]);
+  // the Lab run books every position; the day says 6 legs opened and 6 closed
+  const r = lab(s, sp({ max_entries: 3 }));
+  assert.equal(r.traded, 3);
+  assert.deepEqual(r.days.map((d: any) => [d.status, d.opened, d.closed]), [['traded', 6, 6]]);
+  reconciles(r, 1);
+  // the replay curve carries the earlier positions' P&L: it does not drop back to zero when the next one opens
+  const mtm = three.results[0].mtm, at = (t: number) => mtm.find((m: any) => m.t === t).net;
+  assert.ok(at(hm('10:03')) > at(hm('10:01')) - 200, `${at(hm('10:01'))} -> ${at(hm('10:03'))}`);
+  // out-of-range values are refused
+  for (const e of [{ max_entries: 0 }, { max_entries: 21 }, { max_entries: 1.5 }, { cooldown_min: -1 }, { cooldown_min: 301 }]) assert.equal(G.validate(sp(e)).ok, false, JSON.stringify(e));
+});
+
+test('lean runs (optimisation): identical fills, positions and ledger to a full run; only the replay text is left out', () => {
+  const sessions = E.syntheticCalendar(30, { iv: 13 }, 5);
+  const s1 = straddle01Spec();
+  const variants: [string, any][] = [
+    ['iron condor', specFromTemplate('iron_condor')],
+    ['strangle, ₹ target and ₹/lot stop', specFromTemplate('short_strangle', {}, { exit: { hold: 'intraday', time: '15:15', settle_at_expiry: true, basis: 'net', target: { kind: 'rupees', value: 1500 }, stop: { kind: 'rupees_per_lot', value: 2500 } } } as any)],
+    ['gross basis', specFromTemplate('long_straddle', {}, { exit: { hold: 'intraday', time: '15:15', settle_at_expiry: true, basis: 'gross', target: { kind: 'pct_premium', value: 20 } } } as any)],
+    ['S1 with two trades a session', { ...s1, entry: { ...s1.entry, max_entries: 2 } }],
+  ];
+  for (const [name, sp] of variants) {
+    const full = runLegs(sessions, sp), lean = G.run(sessions, sp, { L, lean: true });
+    assert.deepEqual(lean.results.map((r: any) => r.fills), full.results.map((r: any) => r.fills), name);
+    assert.deepEqual(lean.positions, full.positions, name);
+    assert.deepEqual(lean.results.map((r: any) => [r.status, r.reason, r.flags, r.exit_reason]), full.results.map((r: any) => [r.status, r.reason, r.flags, r.exit_reason]), name);
+    const a = L.runLedger(full.results, { margin_model: 'hedged' }, {}), b = L.runLedger(lean.results, { margin_model: 'hedged' }, {});
+    assert.deepEqual(b.daily, a.daily, name);
+    assert.deepEqual(b.tradebook.map((t: any) => t.net_pnl), a.tradebook.map((t: any) => t.net_pnl), name);
+    assert.ok(lean.results.every((r: any) => r.events.length === 0 && r.legs.length === 0), name);
+    // the research path (compute.evaluate, lean inside) books the same days as the Lab run
+    const ev = compute.evaluate({ strategy: 'legs', spec: sp }, sessions), lr = compute.run({ strategy: 'legs', spec: sp }, sessions);
+    assert.deepEqual(ev.account.daily, lr.account.daily, name);
+  }
+});

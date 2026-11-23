@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased: strategy builder in the Lab
+
+* The Lab's strategy list has a **Strategy builder** beside the four published rule sets: 16 structures (long and
+  short calls and puts, the four vertical spreads, long and short straddles and strangles, iron condor, iron
+  butterfly, call and put ratio spreads) plus butterflies and backspreads. Each runs on the leg engine with strike
+  offset, width, lots, entry and exit time, intraday or to-expiry hold, stops on short and long legs, a ₹ per lot
+  position target and stop, what to do when a leg is stopped, trades per session, a wait between trades and the
+  last new entry. Calendars and diagonals are listed but blocked: they need the next expiry, which is not stored.
+  `?s=iron_condor` links and the notebook open them like any other strategy.
+* One registry (`web/lib/strategyRegistry.ts`) describes every Lab strategy; `builderSpec` turns the Lab's settings
+  into the StrategySpec that runs. Strategy 01 and the other published rule sets are unchanged.
+* Leg engine: stops and targets in ₹ on the leg or ₹ per lot; position levels in ₹ for the whole position; more
+  than one position a session (`entry.max_entries`, `entry.cooldown_min`), one at a time, decided again on the next
+  eligible bar; a lean mode for optimisation. All optional: existing specs normalise, hash and run as before.
+* Speed, same results: per-session lookups are cached, the per-bar exit-charge estimate reuses the day's rates
+  (`L.chargeTotal`), and the ledger computes the hedged margin once per change of open legs instead of at every
+  mark. Over a year of real sessions (244), end to end: iron condor 548 → 138 ms, short strangle 392 → 118 ms,
+  bull put spread 360 → 97 ms, with identical nets. Measure with `DAYFILES=… node --experimental-strip-types
+  scripts/bench.mts`.
+* `compute.evaluate` (research tools) accepts builder strategies.
+* Fixed: a run at default settings of Strategy 01 or 03 counted its exit-time field as "1 changed" and never became
+  the default-rules baseline. A leg-engine headline now counts positions, not legs, and its summary says so.
+* Saved runs: `web/supabase/schema.sql` widens the `runs.strategy` check so any Lab strategy can be saved to the
+  account (it allowed only the first three, which already refused EMA pullback runs). Re-run it in the SQL editor.
+* Tests: hand-worked iron butterfly, ₹ levels, trades per session, lean = full, and `tests/registry.test.mts`
+  (the 16 structures on real day files when `DAYFILES` is set). Golden fingerprints unchanged.
+
 ## Unreleased: long ranges no longer overflow the stack
 
 * Root cause of "Maximum call stack size exceeded": `Math.min(...xs)` / `Math.max(...xs)` pass every element as a call

@@ -13,6 +13,11 @@
  *  - expiry settlement is cash at intrinsic value against the index close of the last bar of expiry day.
  * Charges come from the ledger's dated tables (L.chargesFor / L.settlementCharges), so the engine's cost lines and
  * the ledger reconcile exactly.
+ *
+ * One position is open at a time. With entry.max_entries > 1, a position that closes before the cutoff can be
+ * followed by another the same session: conditions and strikes are decided again on the next eligible bar.
+ * Sessions are never modified; lookups that depend only on a session are cached beside it (WeakMap), so an
+ * optimisation study that runs the same sessions many times pays for them once.
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -26,6 +31,11 @@
   const HOLDS = ['intraday', 'sessions', 'expiry'];
   const ON_STOP = ['keep_others', 'close_all', 'reenter'];
   const CONDITIONS = ['or_inside', 'or_width_pct', 'gap_pct', 'move_pct', 'net_premium'];
+  // per-leg levels: % of the leg's entry price, premium points, ₹ on the leg's whole quantity, ₹ per lot of the leg
+  const LEG_LEVELS = ['pct', 'points', 'rupees', 'rupees_per_lot'];
+  // position levels on mark-to-market P&L: ₹ per base lot, % of the net entry premium, ₹ for the whole position
+  const POS_LEVELS = ['rupees_per_lot', 'pct_premium', 'rupees'];
+  const MAX_ENTRIES = 20, MAX_COOLDOWN = 300;
 
   const EXECUTION_DEFAULTS = { slip_pct: 0.5, slip_ticks: 1, stop_slip_mult: 2, stop_fill: 'gap_aware', brokerage_per_order: 20, exercise_stt_pct: 0.125 };
 
@@ -82,6 +92,10 @@
     spec.legs = Array.isArray(spec.legs) ? spec.legs : [];
     spec.legs.forEach((l, i) => { l.id = l.id || 'L' + (i + 1); l.ratio = l.ratio == null ? 1 : l.ratio; l.expiry = Object.assign({ series: 'WEEK', nth: 1 }, l.expiry || {}); });
     spec.entry = Object.assign({ time: '09:20', weekdays: [0, 1, 2, 3, 4], conditions: [] }, spec.entry || {});
+    // The defaults (one entry a session, no cooldown) are left out rather than filled in, so a spec that does not
+    // use them normalises, and hashes, exactly as it did before they existed.
+    if (spec.entry.max_entries === 1 || spec.entry.max_entries == null) delete spec.entry.max_entries;
+    if (spec.entry.cooldown_min === 0 || spec.entry.cooldown_min == null) delete spec.entry.cooldown_min;
     spec.exit = Object.assign({ hold: 'intraday', time: '15:15', settle_at_expiry: true, basis: 'net' }, spec.exit || {});
     spec.adjust = Object.assign({ on_leg_stop: 'keep_others', max_reentries: 0, cutoff: '14:30' }, spec.adjust || {});
     spec.execution = Object.assign({}, EXECUTION_DEFAULTS, spec.execution || {});
@@ -118,7 +132,7 @@
         if (j < 0 || j >= i) bad(`${at}: a leg-relative strike must refer to an earlier leg.`);
         if (!Number.isInteger(s.steps)) bad(`${at}: the strike offset from leg ${s.leg} must be a whole number of strikes.`);
       }
-      for (const k of ['stop', 'target']) if (l[k] && !(['pct', 'points'].includes(l[k].kind) && l[k].value > 0)) bad(`${at}: ${k} must be a positive % or points.`);
+      for (const k of ['stop', 'target']) if (l[k] && !(LEG_LEVELS.includes(l[k].kind) && l[k].value > 0 && isFinite(l[k].value))) bad(`${at}: ${k} must be a positive % of premium, premium points, ₹ or ₹ per lot.`);
       if (l.stop && l.stop.kind === 'pct' && l.action === 'BUY' && l.stop.value >= 100) bad(`${at}: a long leg's stop must be below 100% of its premium.`);
       if (l.target && l.target.kind === 'pct' && l.action === 'SELL' && l.target.value >= 100) bad(`${at}: a short leg's target must be below 100% of its premium.`);
     });
@@ -128,6 +142,10 @@
     if (spec.exit.hold === 'intraday' && !(xt > et)) bad('For an intraday hold the exit time must be after the entry time.');
     if (!isFinite(cut)) bad('Cutoff must be a time (HH:MM).');
     if (!Array.isArray(spec.entry.weekdays) || !spec.entry.weekdays.length || spec.entry.weekdays.some(d => ![0, 1, 2, 3, 4].includes(d))) bad('Pick at least one weekday (Monday to Friday).');
+    const me = spec.entry.max_entries, cd = spec.entry.cooldown_min;
+    if (me != null && !(Number.isInteger(me) && me >= 1 && me <= MAX_ENTRIES)) bad(`Trades per session must be a whole number from 1 to ${MAX_ENTRIES}.`);
+    if (cd != null && !(Number.isInteger(cd) && cd >= 0 && cd <= MAX_COOLDOWN)) bad(`The wait after a trade must be a whole number of minutes from 0 to ${MAX_COOLDOWN}.`);
+    if (me > 1 && isFinite(cut) && isFinite(et) && cut <= et + 1) warnings.push(gate('INVALID_SPEC', `More than one trade a session is set, but the last new entry (${spec.adjust.cutoff}) leaves no time after the first; only one will open.`));
     if (spec.entry.dte && ((spec.entry.dte.min != null && spec.entry.dte.min < 0) || (spec.entry.dte.max != null && spec.entry.dte.min != null && spec.entry.dte.max < spec.entry.dte.min))) bad('Days-to-expiry filter: min must be ≥ 0 and ≤ max.');
     for (const c of spec.entry.conditions || []) {
       if (!CONDITIONS.includes(c.kind)) { bad(`Unknown entry condition ${c.kind}.`); continue; }
@@ -148,7 +166,7 @@
     if (!['net', 'gross'].includes(spec.exit.basis)) bad('Exit basis must be net or gross.');
     for (const k of ['stop', 'target']) {
       const v = spec.exit[k];
-      if (v && !(['rupees_per_lot', 'pct_premium'].includes(v.kind) && v.value > 0)) bad(`Position ${k} must be a positive ₹ per lot or % of premium.`);
+      if (v && !(POS_LEVELS.includes(v.kind) && v.value > 0 && isFinite(v.value))) bad(`Position ${k} must be a positive ₹ per lot, ₹ in total or % of premium.`);
     }
     if (!ON_STOP.includes(spec.adjust.on_leg_stop)) bad('On a leg stop: keep the others, close all, or re-enter.');
     if (spec.adjust.on_leg_stop === 'reenter' && !(Number.isInteger(spec.adjust.max_reentries) && spec.adjust.max_reentries >= 1 && spec.adjust.max_reentries <= 5)) bad('Re-entries must be 1 to 5.');
@@ -193,26 +211,63 @@
     return null;
   }
 
+  // ------------------------------------------------------------------ per-session lookups
+  // The engine never modifies a session, so what depends only on one session (or one expiry of it) is worked out
+  // once and kept beside it: the minute -> bar table, the strikes listed at each bar, the expiry a leg trades, the
+  // opening range and the session's contribution to the dataset caps. Same answers as computing them each time.
+  const SESSION_CACHE = new WeakMap(), EXPIRY_CACHE = new WeakMap();
+  function cacheOf(s) {
+    let c = SESSION_CACHE.get(s);
+    if (!c) { c = { idx: null, exact: true, expiry: new Map(), or: new Map(), caps: null }; SESSION_CACHE.set(s, c); }
+    return c;
+  }
+  /** Index of the bar that starts at minute t, or -1: what s.times.indexOf(t) returns, without the scan. */
+  function idxOf(s, t) {
+    const c = cacheOf(s);
+    if (!c.idx) {
+      c.idx = new Int32Array(1440).fill(-1);
+      for (let i = 0; i < s.times.length; i++) {
+        const m = s.times[i];
+        if (Number.isInteger(m) && m >= 0 && m < 1440) { if (c.idx[m] < 0) c.idx[m] = i; } else c.exact = false;
+      }
+    }
+    if (!c.exact) return s.times.indexOf(t);  // times off the 1-minute grid: fall back to the plain search
+    return Number.isInteger(t) && t >= 0 && t < 1440 ? c.idx[t] : s.times.indexOf(t);
+  }
+  /** What one session contributes to DatasetCaps. */
+  function sessionCaps(s) {
+    const c = cacheOf(s);
+    if (c.caps) return c.caps;
+    const series = new Set();
+    let window = 0;
+    for (const ex of s.expiries) {
+      series.add(ex.series || 'WEEK');
+      const ks = [...new Set(Object.keys(ex.contracts).map(k => +k.split(':')[1]))].sort((a, b) => a - b);
+      if (ks.length > 1) window = Math.max(window, Math.floor((ks.length - 1) / 2));
+    }
+    const byS = {};
+    for (const ex of s.expiries) { const k = ex.series || 'WEEK'; byS[k] = (byS[k] || 0) + 1; }
+    c.caps = { series: [...series], window, nth2: Object.values(byS).some(n => n > 1), assumed: !!(s.meta && /^assumed/.test(s.meta.expiry_source || '')),
+      bid_ask: s.expiries.some(ex => Object.values(ex.contracts).some(x => x.bid && x.bid.some(v => v != null))) };
+    return c.caps;
+  }
+
   /** What a set of sessions can support (DatasetCaps). */
   function capsOf(sessions) {
     const real = sessions.some(s => s.source && s.source !== 'synthetic');
     const series = new Set(), nth = new Set([1]);
-    let window = 0, assumed = false;
+    let window = 0, assumed = false, bidAsk = false;
     for (const s of sessions) {
-      for (const ex of s.expiries) {
-        series.add(ex.series || 'WEEK');
-        const ks = [...new Set(Object.keys(ex.contracts).map(k => +k.split(':')[1]))].sort((a, b) => a - b);
-        if (ks.length > 1) window = Math.max(window, Math.floor((ks.length - 1) / 2));
-      }
-      const byS = {};
-      for (const ex of s.expiries) { const k = ex.series || 'WEEK'; byS[k] = (byS[k] || 0) + 1; }
-      if (Object.values(byS).some(n => n > 1)) nth.add(2);
-      if (s.meta && /^assumed/.test(s.meta.expiry_source || '')) assumed = true;
+      const c = sessionCaps(s);
+      for (const x of c.series) series.add(x);
+      if (c.window > window) window = c.window;
+      if (c.nth2) nth.add(2);
+      if (c.assumed) assumed = true;
+      if (c.bid_ask) bidAsk = true;
     }
     const sym = sessions[0] ? sessions[0].symbol : 'NIFTY';
     return { source: real ? 'dhan' : 'synthetic', underlying: sym, series: [...series].sort(), nth: [...nth].sort(), strike_window: real ? Math.min(window, 10) : window,
-      greeks: !real, bid_ask: sessions.some(s => s.expiries.some(ex => Object.values(ex.contracts).some(c => c.bid && c.bid.some(v => v != null)))),
-      continuous: real, expiry_assumed: assumed };
+      greeks: !real, bid_ask: bidAsk, continuous: real, expiry_assumed: assumed };
   }
 
   // ------------------------------------------------------------------ prices
@@ -274,12 +329,27 @@
 
   // ------------------------------------------------------------------ strike selection
   function expiryFor(s, leg) {
+    const c = cacheOf(s), key = leg.expiry.series + '|' + leg.expiry.nth;
+    if (c.expiry.has(key)) return c.expiry.get(key);
     const list = s.expiries.filter(e => (e.series || 'WEEK') === leg.expiry.series && e.expiry >= s.date)
       .sort((a, b) => (a.expiry < b.expiry ? -1 : a.expiry > b.expiry ? 1 : 0));
-    return list[leg.expiry.nth - 1] || null;
+    const ex = list[leg.expiry.nth - 1] || null;
+    c.expiry.set(key, ex);
+    return ex;
   }
+  /** Strikes with a price at bar i, ascending, and the strike step. Read-only: the arrays are shared. */
   function gridOf(ex, i) {
-    return [...new Set(Object.keys(ex.contracts).filter(k => ex.contracts[k].c[i] != null).map(k => +k.split(':')[1]))].sort((a, b) => a - b);
+    let c = EXPIRY_CACHE.get(ex);
+    if (!c) { c = { strikes: Object.keys(ex.contracts).map(k => [+k.split(':')[1], ex.contracts[k].c]), bars: [] }; EXPIRY_CACHE.set(ex, c); }
+    let g = c.bars[i];
+    if (!g) {
+      const set = new Set();
+      for (const [k, cl] of c.strikes) if (cl[i] != null) set.add(k);
+      const ks = [...set].sort((a, b) => a - b);
+      g = { ks, step: stepOf(ks) };
+      c.bars[i] = g;
+    }
+    return g;
   }
   function stepOf(ks) {
     let st = Infinity;
@@ -288,11 +358,11 @@
   }
   /** Nearest listed strike to spot (ties: the lower strike), the strike step, and the grid, at bar i (a completed bar). */
   function atmOf(ex, i, spot) {
-    const ks = gridOf(ex, i);
+    const g = gridOf(ex, i), ks = g.ks;
     if (!ks.length) return null;
     let atm = ks[0];
     for (const k of ks) if (Math.abs(k - spot) < Math.abs(atm - spot)) atm = k;
-    return { atm, step: stepOf(ks), ks };
+    return { atm, step: g.step, ks };
   }
   /** Picks every leg's strike at decision bar i (closes of bar i are known). Returns { legs } or { why }.
    *  `known` gives strikes of legs not being selected now (a re-entry relative to a leg that is still open). */
@@ -352,16 +422,23 @@
   function candle(s, from, minutes) {
     const idx = [], missing = [];
     for (let t = from; t < from + minutes; t++) {
-      const i = s.times.indexOf(t);
+      const i = idxOf(s, t);
       if (i < 0 || s.und.o[i] == null) missing.push(fmt(t)); else idx.push(i);
     }
     if (missing.length) return { missing };
+    // spreads below are over one candle's minutes (at most a few dozen), never over a whole range
     return { o: s.und.o[idx[0]], h: Math.max(...idx.map(j => s.und.h[j])), l: Math.min(...idx.map(j => s.und.l[j])), c: s.und.c[idx[idx.length - 1]] };
   }
+  /** Opening range high and low from candles of cm minutes over the first orm minutes. Read-only: cached per session. */
   function openingRange(s, orm, cm) {
+    const c0 = cacheOf(s), key = orm + '|' + cm;
+    if (c0.or.has(key)) return c0.or.get(key);
     const cs = [];
-    for (let t = OPEN; t < OPEN + orm; t += cm) { const c = candle(s, t, cm); if (c.missing) return { missing: c.missing }; cs.push(c); }
-    return { h: Math.max(...cs.map(c => c.h)), l: Math.min(...cs.map(c => c.l)) };
+    let out = null;
+    for (let t = OPEN; t < OPEN + orm; t += cm) { const c = candle(s, t, cm); if (c.missing) { out = { missing: c.missing }; break; } cs.push(c); }
+    if (!out) out = { h: Math.max(...cs.map(c => c.h)), l: Math.min(...cs.map(c => c.l)) };
+    c0.or.set(key, out);
+    return out;
   }
   const inside = (c, hi, lo, mode) => (mode === 'full' ? c.h <= hi && c.l >= lo : mode === 'body' ? Math.max(c.o, c.c) <= hi && Math.min(c.o, c.c) >= lo
     : mode === 'close' ? lo <= c.c && c.c <= hi : c.h >= lo && c.l <= hi);
@@ -397,14 +474,34 @@
   }
 
   // ------------------------------------------------------------------ the run
+  /** A leg's stop or target price from its entry price. 'pct' keeps its original multiply form (identical to the
+   *  tick); points, ₹ on the leg's whole quantity and ₹ per lot of the leg become premium points first. Rounded
+   *  against you: a level above the entry rounds up, one below rounds down (and never below zero). */
+  function levelPx(level, px, dir, qty, lotSize, isStop) {
+    const above = (dir < 0) === isStop; // a short leg's stop and a long leg's target sit above the entry price
+    if (level.kind === 'pct') return above ? roundUp(px * (1 + level.value / 100), TICK) : Math.max(0, roundDown(px * (1 - level.value / 100), TICK));
+    const pts = level.kind === 'rupees' ? level.value / qty : level.kind === 'rupees_per_lot' ? level.value / lotSize : level.value;
+    return above ? roundUp(px + pts, TICK) : Math.max(0, roundDown(px - pts, TICK));
+  }
+  /** A position stop or target as ₹ of mark-to-market P&L (null = none). */
+  function moneyLevel(level, lots, premiumRupees) {
+    if (!level) return null;
+    if (level.kind === 'rupees_per_lot') return level.value * lots;
+    if (level.kind === 'rupees') return level.value;
+    return level.value / 100 * Math.abs(premiumRupees);
+  }
+
   /**
-   * Runs a spec over sessions (sorted by date). opts: { L: ledger module (charges), account: { exercise_stt_pct?, brokerage_per_order? } }.
-   * Returns { results: DayResult[], positions: PositionRecord[], gates, config_hash, spec }.
+   * Runs a spec over sessions (sorted by date). opts: { L: ledger module (charges), caps?: DatasetCaps, lean?: boolean }.
+   * lean is for optimisation studies: no event text, no per-leg display rows, and the per-bar marks carry prices
+   * only. Fills, positions and everything the ledger reads are the same as a full run (tests/legs.test.mts).
+   * Returns { results: DayResult[], positions: PositionRecord[], gates, config_hash, spec, caps }.
    */
   function run(sessions0, spec0, opts) {
     opts = opts || {};
     const L = opts.L;
     if (!L || !L.chargesFor) throw new Error('legs.run needs the ledger module (opts.L) for dated charges');
+    const lean = !!opts.lean;
     const sessions = sessions0.slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
     const caps = opts.caps || capsOf(sessions);
     const v = validate(spec0, caps);
@@ -412,19 +509,31 @@
     const spec = v.spec, ex = spec.execution;
     const config_hash = hashStr(stable(spec));
     const entryT = hm(spec.entry.time), exitT = hm(spec.exit.time), cutT = hm(spec.adjust.cutoff);
+    const maxEntries = spec.entry.max_entries || 1, cooldown = spec.entry.cooldown_min || 0;
+    // a later entry in a session is decided on the opening-range condition's candle grid, when the spec has one
+    const orc = (spec.entry.conditions || []).find(c => c.kind === 'or_inside');
+    const grid = orc ? (orc.candle_minutes || 5) : 1;
+    const netBasis = spec.exit.basis === 'net';
     const results = [], positions = [];
     let pos = null, posSeq = 0;
     const warnings = v.warnings.slice();
 
     const charges = (action, px, qty, date, settle, dir) => (settle ? L.settlementCharges(dir, px, qty, ex.exercise_stt_pct) : L.chargesFor(action, px, qty, date, ex.brokerage_per_order));
+    const anyOpen = p => { for (const l of p.legs) if (l.open) return true; return false; };
 
     for (let si = 0; si < sessions.length; si++) {
       const s = sessions[si], prev = si > 0 ? sessions[si - 1] : null, lastSession = si === sessions.length - 1;
       const res = { date: s.date, symbol: s.symbol, source: s.source || '?', strategy: 'legs', status: 'no_entry', reason: null, flags: [], fills: [], mtm: [], events: [], legs: [],
         carry: [], lot_size: s.expiries[0] ? s.expiries[0].lot_size : null, exit_reason: '' };
       const flags = new Set();
-      const ev = (t, kind, text, extra) => res.events.push(Object.assign({ t, kind, text }, extra || {}));
+      const ev = (t, kind, text, extra) => { if (!lean) res.events.push(Object.assign({ t, kind, text }, extra || {})); };
       const times = s.times, n = times.length;
+      let rates = null; // the day's dated rates, looked up once for the per-bar estimate of the charges to close
+      const exitCharge = lg => {
+        if (!L.chargeTotal) return L.chargesFor(lg.dir < 0 ? 'BUY' : 'SELL', lg.last_px, lg.qty, s.date, ex.brokerage_per_order).total;
+        if (!rates) rates = L.ratesFor(s.date);
+        return L.chargeTotal(rates, lg.dir < 0 ? 'BUY' : 'SELL', lg.last_px, lg.qty, ex.brokerage_per_order);
+      };
       const fill = (lg, t, action, px, reason, extra) => {
         const settle = !!(extra && extra.settlement);
         const c = charges(action, px, lg.qty, s.date, settle, lg.dir);
@@ -437,7 +546,7 @@
       const closeLeg = (lg, t, px, reason, extra) => {
         fill(lg, t, lg.dir < 0 ? 'BUY' : 'SELL', px, reason, extra);
         Object.assign(lg, { open: false, exit_t: t, exit_date: s.date, exit_px: px, exit_reason: reason, last_px: px });
-        ev(t, extra && extra.settlement ? 'settle' : 'exit', `${lg.dir < 0 ? 'BUY' : 'SELL'} ${lg.right} ${lg.strike} @ ${px.toFixed(2)} (${reason})`, { leg: lg.id });
+        if (!lean) ev(t, extra && extra.settlement ? 'settle' : 'exit', `${lg.dir < 0 ? 'BUY' : 'SELL'} ${lg.right} ${lg.strike} @ ${px.toFixed(2)} (${reason})`, { leg: lg.id });
       };
 
       // ---- a position carried from an earlier session: refresh contracts, check its data
@@ -450,41 +559,48 @@
         }
       }
 
-      // ---- the entry decision
+      /** The entry decision for an order at minute T, on bars that closed before T: { ok, ei, sel, spot }, or the
+       *  { status, reason } that says why not. */
+      const decideAt = (T) => {
+        const ei = idxOf(s, T);
+        if (ei <= 0 || times[ei - 1] !== T - 1 || s.und.c[ei - 1] == null) return { status: 'excluded', reason: `no index bar at ${fmt(T - 1)} to decide on` };
+        const spot = s.und.c[ei - 1];
+        const cond = checkIndexConditions(spec, s, prev, T, spot);
+        if (cond) return cond;
+        const sel = selectStrikes(spec, s, ei - 1, spot);
+        if (sel.why) return { status: sel.excluded ? 'excluded' : 'no_entry', reason: sel.why };
+        const chosen = Object.values(sel.legs);
+        let near = null;
+        for (const x of chosen) if (near == null || x.ex.expiry < near) near = x.ex.expiry;
+        const dte = dayDiff(s.date, near);
+        if (spec.entry.dte && ((spec.entry.dte.min != null && dte < spec.entry.dte.min) || (spec.entry.dte.max != null && dte > spec.entry.dte.max))) return { status: 'filtered', reason: `days to expiry ${dte} outside the filter` };
+        let netPts = 0;
+        for (const x of chosen) netPts += (x.leg.action === 'SELL' ? 1 : -1) * x.leg.ratio * x.con.c[ei - 1];
+        const np = (spec.entry.conditions || []).find(c => c.kind === 'net_premium');
+        if (np && ((np.min != null && netPts < np.min) || (np.max != null && netPts > np.max))) return { status: 'filtered', reason: `net premium ${netPts.toFixed(2)} outside the filter` };
+        const missing = chosen.filter(x => x.con.o[ei] == null);
+        if (missing.length) return { status: 'excluded', reason: `no price at ${fmt(T)} for ${missing.map(x => `${x.leg.right} ${x.strike}`).join(', ')}` };
+        return { ok: true, ei, sel, spot };
+      };
+      /** A later entry the same session: the first bar at or after minute `from` where every rule passes, before the
+       *  cutoff (and, intraday, before the exit time), on the opening-range candle grid when the spec has one. */
+      const scan = (from) => {
+        let T = Math.max(from, entryT);
+        if (grid > 1) T = OPEN + Math.ceil((T - OPEN) / grid) * grid;
+        const last = Math.min(cutT, spec.exit.hold === 'intraday' ? exitT : CLOSE - 1) - 1;
+        for (; T <= last; T += grid) { const d = decideAt(T); if (d.ok) return d; }
+        return null;
+      };
+
+      // ---- the session's first entry decision, at the entry time
       let decided = null; // { status, reason } when no entry today
-      let entryI = -1;
+      let firstI = -1, opened = 0;
       if (!pos) {
         if (!spec.entry.weekdays.includes(weekday(s.date))) decided = { status: 'filtered', reason: 'weekday filter' };
         else {
-          const ei = times.indexOf(entryT);
-          if (ei <= 0 || times[ei - 1] !== entryT - 1 || s.und.c[ei - 1] == null) decided = { status: 'excluded', reason: `no index bar at ${fmt(entryT - 1)} to decide on` };
-          else {
-            const spot = s.und.c[ei - 1];
-            decided = checkIndexConditions(spec, s, prev, entryT, spot);
-            if (!decided) {
-              const sel = selectStrikes(spec, s, ei - 1, spot);
-              if (sel.why) decided = { status: sel.excluded ? 'excluded' : 'no_entry', reason: sel.why };
-              else {
-                const near = Object.values(sel.legs).map(x => x.ex.expiry).sort()[0];
-                const dte = dayDiff(s.date, near);
-                if (spec.entry.dte && ((spec.entry.dte.min != null && dte < spec.entry.dte.min) || (spec.entry.dte.max != null && dte > spec.entry.dte.max))) decided = { status: 'filtered', reason: `days to expiry ${dte} outside the filter` };
-                else {
-                  let netPts = 0;
-                  for (const x of Object.values(sel.legs)) netPts += (x.leg.action === 'SELL' ? 1 : -1) * x.leg.ratio * x.con.c[ei - 1];
-                  const np = (spec.entry.conditions || []).find(c => c.kind === 'net_premium');
-                  if (np && ((np.min != null && netPts < np.min) || (np.max != null && netPts > np.max))) decided = { status: 'filtered', reason: `net premium ${netPts.toFixed(2)} outside the filter` };
-                  else {
-                    const missing = Object.values(sel.legs).filter(x => x.con.o[ei] == null);
-                    if (missing.length) decided = { status: 'excluded', reason: `no price at ${fmt(entryT)} for ${missing.map(x => `${x.leg.right} ${x.strike}`).join(', ')}` };
-                    else {
-                      entryI = ei;
-                      pos = openPosition(++posSeq, sel.legs, s, ei, spot, spec);
-                    }
-                  }
-                }
-              }
-            }
-          }
+          const d = decideAt(entryT);
+          if (d.ok) { firstI = d.ei; pos = openPosition(++posSeq, d.sel.legs, s, d.ei, d.spot, spec); opened = 1; }
+          else decided = d;
         }
       }
 
@@ -498,7 +614,7 @@
         p.entry_premium = p.legs.reduce((a, l) => a + (l.dir < 0 ? 1 : -1) * l.entry_px * l.ratio, 0);
         p.premium_rupees = p.legs.reduce((a, l) => a + (l.dir < 0 ? 1 : -1) * l.entry_px * l.qty, 0);
         positions.push(p);
-        ev(s.times[ei], 'entry', `${p.id} opened: ${p.legs.map(l => `${l.action} ${l.ratio > 1 ? l.ratio + '× ' : ''}${l.right} ${l.strike} ${l.expiry} @ ${l.entry_px.toFixed(2)}`).join(', ')}`);
+        if (!lean) ev(s.times[ei], 'entry', `${p.id} opened: ${p.legs.map(l => `${l.action} ${l.ratio > 1 ? l.ratio + '× ' : ''}${l.right} ${l.strike} ${l.expiry} @ ${l.entry_px.toFixed(2)}`).join(', ')}`);
         return p;
       }
       function addLeg(p, x, s, i, kind, spot) {
@@ -508,20 +624,18 @@
         const lg = { id: `${p.id}.${leg.id}${n ? '.r' + n : ''}`, position: p.id, spec_id: leg.id, kind, action: leg.action, dir, right: leg.right, strike: x.strike, expiry: x.ex.expiry,
           ratio: leg.ratio, qty, lot_size: x.ex.lot_size, entry_date: s.date, entry_t: s.times[i], entry_px: px, open: true, last_px: px, cost: 0, con: x.con, spot,
           exit_t: null, exit_date: null, exit_px: null, exit_reason: null, stop: null, target: null };
-        if (leg.stop) lg.stop = dir < 0 ? roundUp(leg.stop.kind === 'pct' ? px * (1 + leg.stop.value / 100) : px + leg.stop.value, TICK)
-          : Math.max(0, roundDown(leg.stop.kind === 'pct' ? px * (1 - leg.stop.value / 100) : px - leg.stop.value, TICK));
-        if (leg.target) lg.target = dir < 0 ? Math.max(0, roundDown(leg.target.kind === 'pct' ? px * (1 - leg.target.value / 100) : px - leg.target.value, TICK))
-          : roundUp(leg.target.kind === 'pct' ? px * (1 + leg.target.value / 100) : px + leg.target.value, TICK);
+        if (leg.stop) lg.stop = levelPx(leg.stop, px, dir, qty, x.ex.lot_size, true);
+        if (leg.target) lg.target = levelPx(leg.target, px, dir, qty, x.ex.lot_size, false);
         p.legs.push(lg);
         fill(lg, s.times[i], leg.action, px, kind === 'initial' ? 'entry' : 're-entry');
-        ev(s.times[i], kind === 'initial' ? 'sell' : 'reentry', `${leg.action} ${leg.right} ${x.strike} @ ${px.toFixed(2)}${lg.stop != null ? `, stop ${lg.stop.toFixed(2)}` : ''}${lg.target != null ? `, target ${lg.target.toFixed(2)}` : ''}`, { leg: lg.id });
+        if (!lean) ev(s.times[i], kind === 'initial' ? 'sell' : 'reentry', `${leg.action} ${leg.right} ${x.strike} @ ${px.toFixed(2)}${lg.stop != null ? `, stop ${lg.stop.toFixed(2)}` : ''}${lg.target != null ? `, target ${lg.target.toFixed(2)}` : ''}`, { leg: lg.id });
         return lg;
       }
 
-      // ---- manage the position through the session
-      if (pos) {
-        const p = pos;
-        const start = entryI >= 0 ? entryI : 0;
+      // ---- manage one position through the session, from bar `start`. `fresh` = opened today.
+      // Leaves pos = null when every leg is closed, otherwise records what is carried to the next session.
+      let baseNet = 0, baseGross = 0; // P&L of positions closed earlier today, so the day's mark curve continues
+      function manage(p, start, fresh) {
         const sessionsHeld = si - p.entry_session;
         const expiringToday = p.legs.some(l => l.open && l.expiry === s.date);
         const isExitSession = spec.exit.hold === 'intraday' || (spec.exit.hold === 'sessions' && sessionsHeld >= spec.exit.sessions)
@@ -532,13 +646,13 @@
         let pending = [];  // orders to fill at the next bar's open
         let lastI = start, done = false;
         // A carried leg with no prices at all today cannot be marked or closed at market.
-        const blind = p.legs.filter(l => l.open && (!l.con || l.con.o.every(v => v == null)));
-        if (blind.length && entryI < 0) {
+        const blind = fresh ? [] : p.legs.filter(l => l.open && (!l.con || l.con.o.every(v => v == null)));
+        if (blind.length) {
           for (const lg of blind) {
             if (lg.expiry < s.date) { closeLeg(lg, times[0], lg.last_px, 'expired_unobserved'); flags.add('expired_unobserved'); warnings.push(gate('DATA_GAP', `${lg.id} expired on ${lg.expiry}, a day with no stored data; it was closed at its last seen price ${lg.last_px.toFixed(2)}, not settled.`)); }
             else { closeLeg(lg, times[0], lg.last_px, 'data_gap'); flags.add('closed_at_stale_price'); warnings.push(gate('DATA_GAP', `${lg.id} (${lg.right} ${lg.strike}) has no prices on ${s.date} (outside the stored window); closed at its last seen price ${lg.last_px.toFixed(2)}.`)); }
           }
-          if (!p.legs.some(l => l.open)) { p.exit_reason = p.exit_reason || 'data_gap'; done = true; }
+          if (!anyOpen(p)) { p.exit_reason = p.exit_reason || 'data_gap'; done = true; }
         }
         const exitAllAt = (i, reason, legs) => {
           // shorts are bought back before longs are sold, so the hedge is never removed first
@@ -558,22 +672,24 @@
           }
           p.exit_reason = p.exit_reason || reason;
         };
-        const mtmNow = (i) => {
+        const posTarget = moneyLevel(spec.exit.target, spec.lots, p.premium_rupees);
+        const posStop = moneyLevel(spec.exit.stop, spec.lots, p.premium_rupees);
+        // the estimated charges to close are needed for the position levels and, in a full run, for the mark curve
+        const needNet = netBasis && (!lean || posTarget != null || posStop != null);
+        const mtmNow = () => {
           let gross = 0, costs = 0, estExit = 0;
           const px = {};
           for (const lg of p.legs) {
             costs += lg.cost;
             if (lg.open) {
               gross += lg.dir * (lg.last_px - lg.entry_px) * lg.qty;
-              if (spec.exit.basis === 'net') estExit += L.chargesFor(lg.dir < 0 ? 'BUY' : 'SELL', lg.last_px, lg.qty, s.date, ex.brokerage_per_order).total;
+              if (needNet) estExit += exitCharge(lg);
               px[lg.id] = lg.last_px;
             } else gross += lg.dir * (lg.exit_px - lg.entry_px) * lg.qty;
           }
-          const net = spec.exit.basis === 'net' ? gross - costs - estExit : gross;
+          const net = netBasis ? gross - costs - estExit : gross;
           return { gross, net, px };
         };
-        const posTarget = spec.exit.target ? (spec.exit.target.kind === 'rupees_per_lot' ? spec.exit.target.value * spec.lots : spec.exit.target.value / 100 * Math.abs(p.premium_rupees)) : null;
-        const posStop = spec.exit.stop ? (spec.exit.stop.kind === 'rupees_per_lot' ? spec.exit.stop.value * spec.lots : spec.exit.stop.value / 100 * Math.abs(p.premium_rupees)) : null;
 
         for (let i = start; i < n && !done; i++) {
           const t = times[i];
@@ -582,7 +698,7 @@
             // time exit: everything (or, when settling today, only the legs that do not expire today)
             const legs = settleToday ? p.legs.filter(l => l.open && l.expiry !== s.date) : null;
             exitAllAt(i, timeReason, legs);
-            if (!p.legs.some(l => l.open)) { done = true; break; }
+            if (!anyOpen(p)) { done = true; break; }
           }
           // orders scheduled at the previous bar's close
           for (const o of pending) {
@@ -594,10 +710,12 @@
             }
           }
           pending = [];
-          if (!p.legs.some(l => l.open)) { done = true; break; }
+          if (!anyOpen(p)) { done = true; break; }
           // leg stops and targets, on this bar's range (stop first)
           const stopped = [];
-          for (const lg of p.legs.filter(l => l.open)) {
+          for (let k = 0, nl = p.legs.length; k < nl; k++) {
+            const lg = p.legs[k];
+            if (!lg.open) continue;
             const c = lg.con;
             if (!c || c.h[i] == null) { if (lg.stop != null || lg.target != null) flags.add('stop_unmonitored'); continue; }
             const o = c.o[i];
@@ -616,11 +734,12 @@
             }
           }
           for (const lg of p.legs) if (lg.open && lg.con && lg.con.c[i] != null) lg.last_px = lg.con.c[i];
-          const m = mtmNow(i);
+          const m = mtmNow();
           const closeT = t + 1;
-          res.mtm.push({ t: closeT, net: m.net, gross: m.gross, px: m.px });
-          const anyOpen = p.legs.some(l => l.open);
-          if (anyOpen && !(isExitSession && closeT >= exitT)) {
+          if (lean) res.mtm.push({ t: closeT, px: m.px });
+          else res.mtm.push({ t: closeT, net: baseNet ? m.net + baseNet : m.net, gross: baseGross ? m.gross + baseGross : m.gross, px: m.px });
+          const open = anyOpen(p);
+          if (open && !(isExitSession && closeT >= exitT)) {
             if (posTarget != null && m.net >= posTarget) { pending.push({ type: 'exit_all', reason: 'target' }); ev(closeT, 'target', `${p.id} target reached (${Math.round(m.net)} ≥ ${Math.round(posTarget)})`); }
             else if (posStop != null && m.net <= -posStop) { pending.push({ type: 'exit_all', reason: 'stop' }); ev(closeT, 'stop', `${p.id} stop hit (${Math.round(m.net)} ≤ -${Math.round(posStop)})`); }
             else if (stopped.length && spec.adjust.on_leg_stop === 'close_all') { pending.push({ type: 'exit_all', reason: 'leg_stop' }); }
@@ -641,7 +760,7 @@
               }
             }
           }
-          if (!anyOpen && !pending.length) {
+          if (!open && !pending.length) {
             p.exit_reason = p.exit_reason || (stopped.length ? 'leg_stop' : p.legs.some(l => l.exit_reason === 'leg_target') ? 'leg_target' : 'closed');
             done = true;
           }
@@ -654,9 +773,9 @@
           if (k !== n - 1) flags.add('settled_on_earlier_bar');
           // settlement is simultaneous; shorts are booked first so the ledger never sees a hedge removed before what it covers
           for (const lg of p.legs.filter(l => l.open && l.expiry === s.date).sort((a, b) => a.dir - b.dir)) closeLeg(lg, CLOSE, r2(intrinsic(lg.right, S, lg.strike)), 'expiry', { settlement: true, settle_spot: S });
-          if (!p.legs.some(l => l.open)) { p.exit_reason = p.exit_reason || 'expiry'; done = true; }
+          if (!anyOpen(p)) { p.exit_reason = p.exit_reason || 'expiry'; done = true; }
         }
-        if (!done && p.legs.some(l => l.open) && isExitSession) {
+        if (!done && anyOpen(p) && isExitSession) {
           flags.add('session_data_ended');
           exitAllAt(lastI + 1, 'data_end');
           done = true;
@@ -664,17 +783,33 @@
         const openNow = p.legs.filter(l => l.open);
         if (openNow.length) { res.carry = openNow.map(l => l.id); flags.add('carried'); }
         else {
-          p.closed = { date: s.date, t: Math.max(...p.legs.map(l => l.exit_t)) };
+          let closedT = -Infinity;
+          for (const l of p.legs) if (l.exit_t > closedT) closedT = l.exit_t;
+          p.closed = { date: s.date, t: closedT };
           finishPosition(p);
           pos = null;
         }
-        res.legs = p.legs.map(l => ({ id: l.id, side: l.right, strike: l.strike, kind: l.kind, entry_t: l.entry_date === s.date ? l.entry_t : null, entry_px: l.entry_px,
-          exit_t: l.exit_date === s.date ? l.exit_t : null, exit_px: l.exit_px, exit_reason: l.exit_reason, stop: l.stop, net: null }));
+      }
+
+      // ---- the positions of this session: the one carried in or opened at the entry time, then (max_entries > 1)
+      // each later one, opened on the first eligible bar after the previous one closed plus the cooldown
+      let start = firstI >= 0 ? firstI : 0, fresh = firstI >= 0;
+      while (pos) {
+        const p = pos;
+        manage(p, start, fresh);
+        if (!lean) for (const l of p.legs) res.legs.push({ id: l.id, side: l.right, strike: l.strike, kind: l.kind, entry_t: l.entry_date === s.date ? l.entry_t : null, entry_px: l.entry_px,
+          exit_t: l.exit_date === s.date ? l.exit_t : null, exit_px: l.exit_px, exit_reason: l.exit_reason, stop: l.stop, net: null });
         res.exit_reason = p.exit_reason || '';
+        if (pos || maxEntries <= 1 || opened >= maxEntries || !spec.entry.weekdays.includes(weekday(s.date))) break;
+        baseNet += netBasis ? p.net : p.gross; baseGross += p.gross;
+        const next = scan(p.closed.t + 1 + cooldown);
+        if (!next) break;
+        pos = openPosition(++posSeq, next.sel.legs, s, next.ei, next.spot, spec);
+        opened++; start = next.ei; fresh = true;
       }
 
       if (res.fills.length) { res.status = 'traded'; res.reason = null; }
-      else if (res.carry.length || (decided == null && entryI < 0)) { res.status = 'holding'; res.reason = 'position carried; no order today'; }
+      else if (res.carry.length || (decided == null && firstI < 0)) { res.status = 'holding'; res.reason = 'position carried; no order today'; }
       else if (decided) { res.status = decided.status; res.reason = decided.reason; }
       res.flags = [...flags].sort();
       res.fills.sort((a, b) => a.t - b.t);
@@ -710,5 +845,5 @@
     return n;
   }
 
-  return { EXECUTION_DEFAULTS, normalize, validate, capsOf, run, payoff, payoffAt, intrinsic, bsPrice, bsDelta, impliedVol, effectiveOffset, hashStr };
+  return { EXECUTION_DEFAULTS, LEG_LEVELS, POS_LEVELS, MAX_ENTRIES, normalize, validate, capsOf, run, payoff, payoffAt, intrinsic, bsPrice, bsDelta, impliedVol, effectiveOffset, hashStr };
 });

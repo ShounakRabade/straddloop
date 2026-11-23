@@ -19,6 +19,9 @@ const BY_KEY: Record<string, SectionId> = {
   policy: 'strategy', target_pct_margin: 'strategy', long_lots: 'strategy', short_pct: 'strategy',
   stop_points: 'strategy', stop_kind: 'strategy', max_structural_stop: 'strategy', exit_method: 'strategy', max_hold_minutes: 'strategy', max_trades: 'strategy',
   min_vix: 'strategy', max_vix: 'strategy', golden_enabled: 'strategy', silver_enabled: 'strategy', liquidity_sweep: 'strategy',
+  // strategy builder
+  offset: 'strategy', width: 'strategy', hold: 'strategy', short_sl_pct: 'strategy', long_sl_pct: 'strategy', stop_per_lot: 'strategy',
+  on_leg_stop: 'strategy', max_reentries: 'strategy', max_entries: 'strategy', cooldown_min: 'strategy', cutoff: 'strategy',
   seed: 'data', iv: 'data',
   days: 'period', months: 'period',
   capital: 'risk', lots: 'risk', margin_policy: 'risk', margin_span_pct: 'risk', margin_exposure_pct: 'risk',
@@ -34,6 +37,8 @@ export const STRATEGY_GROUP: Record<string, 'Exit' | 'Adjustment' | 'Structure'>
   reentry_enabled: 'Adjustment', long_lots: 'Structure', short_pct: 'Structure',
   stop_points: 'Exit', stop_kind: 'Exit', max_structural_stop: 'Exit', exit_method: 'Exit', max_hold_minutes: 'Exit', max_trades: 'Structure',
   min_vix: 'Adjustment', max_vix: 'Adjustment', golden_enabled: 'Structure', silver_enabled: 'Structure', liquidity_sweep: 'Adjustment',
+  offset: 'Structure', width: 'Structure', hold: 'Exit', short_sl_pct: 'Exit', long_sl_pct: 'Exit', stop_per_lot: 'Exit',
+  on_leg_stop: 'Adjustment', max_reentries: 'Adjustment', max_entries: 'Adjustment', cooldown_min: 'Adjustment', cutoff: 'Adjustment',
 };
 
 /** Fields a run can do without (an empty value means "use the data's own"). */
