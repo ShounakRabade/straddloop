@@ -199,11 +199,22 @@ beside it in WeakMaps, so a study that reruns the same sessions pays for them on
 
 The Lab, the notebook and `?s=` links hold flat parameters keyed by a slug. The registry gives every strategy one
 shape: the published rule sets (01–04, their own engines) and the strategy builder's structures (the templates
-above). A builder structure's parameters (`offset`, `width`, `lots`, `entry_time`, `exit_time`, `hold`,
-`short_sl_pct`, `long_sl_pct`, `target_per_lot`, `stop_per_lot`, `on_leg_stop`, `max_reentries`, `max_entries`,
-`cooldown_min`, `cutoff`, `slip_pct`, account settings) become a spec in `builderSpec`; the run request then carries
-`strategy: 'legs'`, `template` and `spec` (JSON). Zero turns a stop or target off. Templates that need the next
-expiry are listed but blocked with the reason; the four-leg model is the one strategy the optimiser refuses.
+above). A builder structure's parameters become a spec in `builderSpec`; the run request then carries
+`strategy: 'legs'`, `template` and `spec` (JSON). The parameters:
+
+* legs: `legs` (a JSON list of `LegDraft`, or `''` for the structure's own legs built from `offset` and `width`);
+  each draft has `id`, `action`, `right`, `ratio`, `strike` (a StrikeRule), optional `nth`, and optional `stop` /
+  `target`: absent = the default for its side, `null` = none on that leg, or its own `LegLevel`;
+* side defaults: `short_sl`, `short_tp`, `long_sl`, `long_tp`, each with `<key>_unit` (`pct`, `points`, `rupees`,
+  `rupees_per_lot`); position levels `pos_sl`, `pos_tp` with `<key>_unit` (`rupees_per_lot`, `rupees`,
+  `pct_premium`). Zero turns a level off;
+* times and repeats: `entry_time`, `cutoff` (last new entry), `exit_time` (square-off), `hold`, `max_entries`,
+  `cooldown_min`, `on_leg_stop`, `max_reentries`; sizing and costs: `lots`, `slip_pct`, account settings.
+
+The expiry series of every leg follows the data series chosen in the Lab. The page runs `legs.validate` on the
+spec it is about to send, against `labCaps(real, series)` (`web/lib/legs/caps.ts`), so a refusal is shown while
+editing; the run checks again against the loaded sessions' caps. Templates that need the next expiry are listed but
+blocked with the reason; the four-leg model is the one strategy the optimiser refuses.
 
 ---
 

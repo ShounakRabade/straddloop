@@ -2,7 +2,11 @@
 /* Small building blocks of the Lab workspace: icons, the (i) tooltip, a parameter field and a rail section. */
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import type { Field } from '@/lib/strategies';
+import { fieldChanged, unitOf, type Field } from '@/lib/strategies';
+import { fmtLevel, type LevelUnit } from '@/lib/levels';
+import { toMin, type TimeSpec } from '@/lib/sessionTime';
+import { LevelField } from './LevelField';
+import { TimeField } from './TimeField';
 import type { Params } from '@/lib/types';
 
 export const Icon = {
@@ -63,50 +67,91 @@ export function Tip({ label, text, def }: { label: string; text: string; def?: s
   );
 }
 
-const fmtVal = (f: Field, v: unknown) => {
+/** A field's value as words: '₹1,000', '36%', 'Off', '09:50', the option's label. */
+export const fmtVal = (f: Field, v: unknown, p?: Params) => {
   if (f.kind === 'choice') return f.options.find((o) => o.value === v)?.label ?? String(v);
+  if (f.kind === 'time' || f.kind === 'legs') return String(v ?? '');
   const n = Number(v);
+  if (f.kind === 'level') return f.optional && n === 0 ? 'Off' : fmtLevel(p ? unitOf(f, p) : f.units[0], n);
   if (f.zeroOff && n === 0) return 'Off';
   return `${f.prefix ?? ''}${f.prefix ? n.toLocaleString('en-IN') : n}${f.unit ?? ''}`;
 };
 
-/** One strategy or account parameter: label, (i), current value, the control, and what the default is. */
-export function ParamField({ f, value, def, onChange, idPrefix, tip, warn }: {
-  f: Field; value: Params[string]; def: Params[string] | undefined; onChange: (v: string | number | boolean) => void; idPrefix: string; tip?: string; warn?: string | null;
+/** Time-field context from the rail: the picker interval and any order problem with this time. */
+export interface TimeCtx { interval: number; onInterval: (n: number) => void; problem?: { level: 'error' | 'note'; text: string } | null }
+
+/**
+ * One strategy or account parameter: label, (i), the control, and what the default is. Reads and writes the whole
+ * parameter set, so a level can change its value and its unit together.
+ */
+export function ParamField({ f, p, d, set, idPrefix, tip, warn, time }: {
+  f: Field; p: Params; d: Params; set: (k: string, v: string | number | boolean) => void; idPrefix: string; tip?: string; warn?: string | null; time?: TimeCtx;
 }) {
   const id = `${idPrefix}-${f.key}`;
-  const changed = def !== undefined && value !== def;
-  const meta = (
+  const value = p[f.key], def = d[f.key];
+  const changed = fieldChanged(f, p, d);
+  const help = tip ?? f.help;
+  if (f.kind === 'legs') return null; // the legs table draws these
+  if (f.kind === 'time') {
+    const spec: TimeSpec = { min: toMin(f.min)!, max: toMin(f.max)!, grain: f.grain };
+    return <TimeField id={id} label={f.label} role={f.role} value={String(value ?? def ?? '')} def={def as string | undefined} spec={spec} tip={help}
+      onChange={(v) => set(f.key, v)} interval={time?.interval ?? 5} onInterval={time?.onInterval ?? (() => {})} problem={time?.problem ?? null} />;
+  }
+  if (f.kind === 'level') {
+    const unit = unitOf(f, p);
+    return <LevelField id={id} label={f.label} tip={help} role={f.role} units={f.units} unit={unit} value={Number(value ?? 0)} bounds={f.bounds} optional={f.optional}
+      def={def !== undefined ? { value: Number(def), unit: unitOf(f, d) } : null}
+      onChange={(v: number, u: LevelUnit) => { set(f.key, v); if (f.unitKey) set(f.unitKey, u); }} />;
+  }
+  // the default and a reset appear once a value differs from it; an unchanged field needs no extra line
+  const meta = (changed || warn) ? (
     <div className="f-meta">
-      {changed ? <span>Default {fmtVal(f, def)} · <button type="button" className="qlink" onClick={() => onChange(def as string | number | boolean)}>reset</button></span> : <span>Default</span>}
+      {changed && <span>Default {fmtVal(f, def)} · <button type="button" className="qlink" onClick={() => set(f.key, def as string | number | boolean)}>reset</button></span>}
       {warn && <span className="warn">{warn}</span>}
     </div>
-  );
+  ) : null;
   if (f.kind === 'range') {
     const v = Number(value);
     return (
       <div className="f" data-changed={changed}>
         <div className="f-top">
           <label className="f-label" htmlFor={id}>{f.label}</label>
-          <Tip label={f.label} text={tip ?? f.help} />
+          <Tip label={f.label} text={help} />
           <span className="f-val" aria-hidden="true">{fmtVal(f, v)}</span>
         </div>
-        <input id={id} type="range" min={f.min} max={f.max} step={f.step} value={v} aria-valuetext={fmtVal(f, v)} onChange={(e) => onChange(Number(e.target.value))} />
+        <input id={id} type="range" min={f.min} max={f.max} step={f.step} value={v} aria-valuetext={fmtVal(f, v)} onChange={(e) => set(f.key, Number(e.target.value))} />
         {meta}
       </div>
     );
   }
-  const many = f.options.length > 3 || f.options.some((o) => o.label.length > 14);
+  // A few short options read best side by side; more, or long ones, go in a compact dropdown instead of a tall list.
+  const inline = f.options.length <= 3 && f.options.every((o) => o.label.length <= 14);
+  if (!inline) {
+    const at = f.options.findIndex((o) => o.value === value);
+    return (
+      <div className="f" data-changed={changed}>
+        <div className="f-top">
+          <label className="f-label" htmlFor={id}>{f.label}</label>
+          <Tip label={f.label} text={help} />
+        </div>
+        <select id={id} className="in" value={at < 0 ? '' : String(at)} onChange={(e) => set(f.key, f.options[Number(e.target.value)].value)}>
+          {at < 0 && <option value="">{String(value)}</option>}
+          {f.options.map((o, i) => <option key={String(o.value)} value={String(i)}>{o.label}</option>)}
+        </select>
+        {meta}
+      </div>
+    );
+  }
   return (
     <fieldset className="f" data-changed={changed} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <div className="f-top">
         <legend className="f-label" style={{ padding: 0, float: 'left' }}>{f.label}</legend>
-        <Tip label={f.label} text={tip ?? f.help} />
+        <Tip label={f.label} text={help} />
       </div>
-      <div className={`seg2 ${many ? 'seg2--col' : ''}`}>
+      <div className="seg2">
         {f.options.map((o) => (
           <label key={String(o.value)}>
-            <input type="radio" name={id} checked={value === o.value} onChange={() => onChange(o.value)} />
+            <input type="radio" name={id} checked={value === o.value} onChange={() => set(f.key, o.value)} />
             <span>{o.label}</span>
           </label>
         ))}

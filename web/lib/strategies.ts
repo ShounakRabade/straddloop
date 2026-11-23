@@ -1,9 +1,28 @@
 import type { Params, StrategySlug } from './types';
+import { fmtLevel, type Bounds, type LevelRole, type LevelUnit } from './levels.ts';
+import type { TimeRole } from './sessionTime';
 
 export type Field =
   /** zeroOff: 0 means the rule is off, and reads "Off". */
   | { key: string; label: string; help: string; kind: 'range'; min: number; max: number; step: number; unit?: string; prefix?: string; zeroOff?: boolean }
-  | { key: string; label: string; help: string; kind: 'choice'; options: { value: string | number | boolean; label: string }[] };
+  | { key: string; label: string; help: string; kind: 'choice'; options: { value: string | number | boolean; label: string }[] }
+  /** A time of day ('HH:MM'), set with the session time picker. grain: the engine's resolution for it, in minutes. */
+  | { key: string; label: string; help: string; kind: 'time'; role: TimeRole; min: string; max: string; grain: 1 | 5 }
+  /** A stop or target. With more than one unit, the unit is stored under unitKey. optional: 0 means off. */
+  | { key: string; label: string; help: string; kind: 'level'; role: LevelRole; units: LevelUnit[]; unitKey?: string; bounds?: Partial<Record<LevelUnit, Bounds>>; optional?: boolean }
+  /** The strategy builder's legs, edited in the legs table: a JSON list, or '' for the structure's own legs. */
+  | { key: string; label: string; help: string; kind: 'legs' };
+
+/** The unit a level field is in, for these parameters. */
+export const unitOf = (f: Extract<Field, { kind: 'level' }>, p: Params): LevelUnit => (f.unitKey && f.units.includes(p[f.unitKey] as LevelUnit) ? (p[f.unitKey] as LevelUnit) : f.units[0]);
+
+/** Whether a field differs from its default; a level also counts a change of unit while it is on. */
+export function fieldChanged(f: Field, p: Params, d: Params): boolean {
+  if (f.kind === 'legs') return !!p[f.key] && p[f.key] !== (d[f.key] ?? '');
+  if (p[f.key] === undefined) return false;
+  if (p[f.key] !== d[f.key]) return true;
+  return f.kind === 'level' && !!f.unitKey && Number(p[f.key]) > 0 && unitOf(f, p) !== unitOf(f, d);
+}
 
 export interface Strategy {
   slug: StrategySlug;
@@ -39,10 +58,6 @@ const sample: Field[] = [
   { key: 'seed', label: 'Market seed', help: 'A different seed is a different imaginary market. If the result flips with the seed, it was luck.', kind: 'range', min: 1, max: 20, step: 1 },
   { key: 'iv', label: 'Model implied vol', help: 'Realised vol in the model is 12%. Above that, option sellers are overpaid; below, underpaid.', kind: 'range', min: 9, max: 22, step: 1, unit: '%' },
 ];
-const timeOptions = (from: number, to: number, step = 15) => Array.from({ length: Math.floor((to - from) / step) + 1 }, (_, i) => {
-  const m = from + i * step;
-  return { value: `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`, label: `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}` };
-});
 
 /** Account and margin settings, shared by the two intraday strategies. Margin is ESTIMATED, never actual. */
 export const ACCOUNT_DEFAULTS = { capital: 500000, margin_policy: 'reject', margin_span_pct: 9, margin_exposure_pct: 2, brokerage_per_order: 20 };
@@ -90,14 +105,16 @@ export const STRATEGIES: Strategy[] = [
     ],
     synthetic: 'On 120 synthetic sessions it traded 63 days, won 71% of them and still lost ₹32,885 after costs: the average losing day was about four times the average winner. Re-entry legs lost money at every implied-vol level tested.',
     experiments: ['Original rules on 2+ years of real data, with costs for the period', 'Re-entry on against re-entry off', 'Stop sweep from 20% to 75%: look for a plateau, not a peak', 'Target against no target, plus a daily loss cap', 'Slippage from 0 to 2%: if the result dies at 1%, it is not tradeable'],
-    defaults: { strategy: 'straddle', days: 120, seed: 1, iv: 13, sl_pct: 36, target_per_lot: 1000, reentry_enabled: true, entry_condition: 'full', entry_time: '09:50', exit_time: '15:15', min_vix: 0, max_vix: 100, lots: 1, strike_offset: 0, slip_pct: 0.5, ...ACCOUNT_DEFAULTS },
+    defaults: { strategy: 'straddle', days: 120, seed: 1, iv: 13, sl_pct: 36, target_per_lot: 1000, max_loss_per_lot: 0, reentry_enabled: true, entry_condition: 'full', entry_time: '09:50', reentry_cutoff: '14:30', exit_time: '15:15', min_vix: 0, max_vix: 100, lots: 1, strike_offset: 0, slip_pct: 0.5, ...ACCOUNT_DEFAULTS },
     fields: [
-      { key: 'entry_time', label: 'Entry time', help: 'Enter on the next available 1-minute bar after this completed 5-minute confirmation candle.', kind: 'choice', options: timeOptions(590, 840) },
-      { key: 'exit_time', label: 'Exit time', help: 'Close open legs by this time.', kind: 'choice', options: timeOptions(840, 925) },
+      { key: 'entry_time', label: 'Entry', help: 'Sell at the open of this minute, after the 5-minute candle before it has closed inside the opening range. On the 5-minute candle grid, from 09:50.', kind: 'time', role: 'entry', min: '09:50', max: '15:00', grain: 5 },
+      { key: 'reentry_cutoff', label: 'Last new entry', help: 'No re-entry leg is sold at or after this time. The published rule is 14:30.', kind: 'time', role: 'last_entry', min: '09:50', max: '15:28', grain: 1 },
+      { key: 'exit_time', label: 'Square-off', help: 'Everything still open is bought back at the open of this minute.', kind: 'time', role: 'exit', min: '09:56', max: '15:29', grain: 1 },
       { key: 'min_vix', label: 'Minimum India VIX', help: 'Filter entry using actual VIX at the entry minute. Missing values only block when a filter is active.', kind: 'range', min: 0, max: 60, step: 1 },
       { key: 'max_vix', label: 'Maximum India VIX', help: 'Filter entry using actual VIX at the entry minute.', kind: 'range', min: 1, max: 100, step: 1 },
-      { key: 'sl_pct', label: 'Stop per leg', help: 'How far above its sell price a leg may rise before it is bought back.', kind: 'range', min: 20, max: 75, step: 1, unit: '%' },
-      { key: 'target_per_lot', label: 'Profit target per lot', help: 'Net of costs. Everything closes when this is reached.', kind: 'range', min: 500, max: 3000, step: 100, prefix: '₹' },
+      { key: 'sl_pct', label: 'Stop per leg', help: 'How far above its sell price a leg may rise before it is bought back, as % of that price. A short option can rise many times over, so the range goes to 500%.', kind: 'level', role: 'short_stop', units: ['pct'] },
+      { key: 'target_per_lot', label: 'Profit target per lot', help: 'Net of costs. Everything closes when the position has made this much per lot.', kind: 'level', role: 'position_target', units: ['rupees_per_lot'], bounds: { rupees_per_lot: { min: 100, max: 50000, step: 50 } } },
+      { key: 'max_loss_per_lot', label: 'Daily loss cap per lot', help: 'A stop for the whole straddle: net loss per lot that closes everything for the day. Not part of the published rules, so it is off by default.', kind: 'level', role: 'position_stop', units: ['rupees_per_lot'], optional: true },
       { key: 'reentry_enabled', label: 'Re-entry after a stop', help: 'Sell a replacement leg when one side is stopped.', kind: 'choice', options: [{ value: true, label: 'On' }, { value: false, label: 'Off' }] },
       { key: 'entry_condition', label: 'Entry candle must', help: 'How strictly the 09:45 candle has to sit inside the opening range.', kind: 'choice',
         options: [{ value: 'full', label: 'Stay fully inside' }, { value: 'body', label: 'Body inside' }, { value: 'close', label: 'Close inside' }, { value: 'overlap', label: 'Touch the range' }] },
@@ -142,12 +159,12 @@ export const STRATEGIES: Strategy[] = [
     experiments: ['Wick breakout against close and strong-body breakouts', 'Reversal definition and buffer of 0, 5 and 10 points', 'Premium target against index target against no target', 'ATM against one strike in the money', 'Regimes by gap and opening-range width, then walk-forward'],
     defaults: { strategy: 'orb', days: 120, seed: 1, iv: 13, target_points: 30, stop_buffer: 0, breakout_def: 'wick', target_basis: 'premium', latest_entry: '14:30', exit_time: '15:15', min_vix: 0, max_vix: 100, lots: 1, strike_offset: 0, slip_pct: 0.5, ...ACCOUNT_DEFAULTS },
     fields: [
-      { key: 'latest_entry', label: 'Last entry time', help: 'Do not open a new trade after this time.', kind: 'choice', options: timeOptions(600, 900) },
-      { key: 'exit_time', label: 'Exit time', help: 'Close open options by this time.', kind: 'choice', options: timeOptions(840, 925) },
+      { key: 'latest_entry', label: 'Last new entry', help: 'No trade opens after this time. Breakouts are read on 5-minute candles, so it is on that grid.', kind: 'time', role: 'last_entry', min: '09:50', max: '15:00', grain: 5 },
+      { key: 'exit_time', label: 'Square-off', help: 'An option still held is sold at the open of this minute.', kind: 'time', role: 'exit', min: '09:56', max: '15:29', grain: 1 },
       { key: 'min_vix', label: 'Minimum India VIX', help: 'Filter entry using actual VIX at the entry minute. Missing values only block when a filter is active.', kind: 'range', min: 0, max: 60, step: 1 },
       { key: 'max_vix', label: 'Maximum India VIX', help: 'Filter entry using actual VIX at the entry minute.', kind: 'range', min: 1, max: 100, step: 1 },
-      { key: 'target_points', label: 'Target', help: 'Premium points above the entry price.', kind: 'range', min: 10, max: 80, step: 5, unit: ' pts' },
-      { key: 'stop_buffer', label: 'Stop buffer', help: 'Index points of room beyond the reversal candle before exiting.', kind: 'range', min: 0, max: 30, step: 1, unit: ' pts' },
+      { key: 'target_points', label: 'Target', help: 'Premium points above the entry price. Turn the target off under Profit target.', kind: 'level', role: 'long_target', units: ['points'], bounds: { points: { min: 1, max: 500, step: 1 } } },
+      { key: 'stop_buffer', label: 'Stop buffer', help: 'Index points of room beyond the reversal candle before exiting.', kind: 'range', min: 0, max: 100, step: 1, unit: ' index pts' },
       { key: 'breakout_def', label: 'A breakout is', help: 'What the breakout candle has to do to count.', kind: 'choice',
         options: [{ value: 'wick', label: 'A wick beyond the range' }, { value: 'close', label: 'A close beyond the range' }, { value: 'body_strength', label: 'A strong-body close' }] },
       { key: 'target_basis', label: 'Profit target', help: 'Turn the target off to exit only on the reversal level or at day end.', kind: 'choice',
@@ -182,11 +199,11 @@ export const STRATEGIES: Strategy[] = [
     experiments: ['Fixed 10, 15 and 20-point underlying stops', 'Structural stop with maximum-risk rejection', 'Engulfing / rejection / morning or evening star confirmation', 'Liquidity sweep required versus optional', 'Fixed 1R, partial at 1R then 2R, and trailing exit'],
     defaults: { strategy: 'ema_pullback', days: 120, seed: 1, iv: 13, entry_time: '09:50', exit_time: '15:15', stop_points: 15, stop_kind: 'fixed', max_structural_stop: 30, exit_method: 'rr1', confirmation: 'engulf_or_rejection', max_hold_minutes: 120, max_trades: 3, strike_offset: 0, min_vix: 0, max_vix: 100, liquidity_sweep: false, golden_enabled: true, silver_enabled: true, lots: 1, slip_pct: 0.5, ...ACCOUNT_DEFAULTS },
     fields: [
-      { key: 'entry_time', label: 'First entry time', help: 'Earliest signal candle close. Execution is the next available 1-minute option open.', kind: 'choice', options: timeOptions(585, 780, 5) },
-      { key: 'exit_time', label: 'Force exit time', help: 'All open positions close at or before this time.', kind: 'choice', options: timeOptions(840, 925) },
-      { key: 'stop_points', label: 'Fixed NIFTY stop', help: 'Underlying index points. Ignored when using the structural stop.', kind: 'choice', options: [10, 15, 20].map(value => ({ value, label: `${value} points` })) },
+      { key: 'entry_time', label: 'First entry', help: 'Earliest signal candle close. Execution is the next available 1-minute option open. Signals are 5-minute candles, so it is on that grid.', kind: 'time', role: 'entry', min: '09:30', max: '13:55', grain: 5 },
+      { key: 'exit_time', label: 'Square-off', help: 'All open positions close at or before this time.', kind: 'time', role: 'exit', min: '09:36', max: '15:29', grain: 1 },
+      { key: 'stop_points', label: 'Fixed NIFTY stop', help: 'Underlying index points. Ignored when using the structural stop.', kind: 'level', role: 'long_stop', units: ['index_points'], bounds: { index_points: { min: 3, max: 150, step: 1 } } },
       { key: 'stop_kind', label: 'Stop type', help: 'Structural stop uses the pullback low/high and rejects risk wider than the maximum.', kind: 'choice', options: [{ value: 'fixed', label: 'Fixed points' }, { value: 'structural', label: 'Pullback structure' }] },
-      { key: 'max_structural_stop', label: 'Maximum structural risk', help: 'Reject a setup if its structural stop is farther away.', kind: 'range', min: 10, max: 60, step: 5, unit: ' index pts' },
+      { key: 'max_structural_stop', label: 'Maximum structural risk', help: 'Reject a setup if its structural stop is farther away.', kind: 'level', role: 'long_stop', units: ['index_points'], bounds: { index_points: { min: 5, max: 300, step: 5 } } },
       { key: 'exit_method', label: 'Exit method', help: 'Compare the baseline 1R target, partial profit and trailing exits.', kind: 'choice', options: [{ value: 'rr1', label: 'Fixed 1:1' }, { value: 'partial_2r', label: '50% at 1R, rest at 2R / breakeven stop' }, { value: 'trailing_ema', label: 'Trail EMA 10 after 1R' }] },
       { key: 'confirmation', label: 'Confirmation candle', help: 'Use a completed trend-direction candle at the EMA zone.', kind: 'choice', options: [{ value: 'engulf_or_rejection', label: 'Engulfing or rejection' }, { value: 'engulfing', label: 'Engulfing (includes morning/evening star)' }, { value: 'rejection', label: 'Rejection wick' }] },
       { key: 'liquidity_sweep', label: 'Require liquidity sweep', help: 'Require a prior swing to be swept and reclaimed before confirmation.', kind: 'choice', options: [{ value: false, label: 'Off' }, { value: true, label: 'On' }] },
@@ -246,10 +263,13 @@ export const bySlug = (slug: string) => STRATEGIES.find((s) => s.slug === slug);
 
 export function describeParams(s: { fields: Field[]; defaults: Params }, params: Params): string[] {
   return s.fields
-    .filter((f) => params[f.key] !== undefined && params[f.key] !== s.defaults[f.key])
+    .filter((f) => fieldChanged(f, params, s.defaults))
     .map((f) => {
       const v = params[f.key];
       if (f.kind === 'choice') return `${f.label}: ${f.options.find((o) => o.value === v)?.label ?? v}`;
+      if (f.kind === 'time') return `${f.label}: ${v}`;
+      if (f.kind === 'legs') { let n = 0; try { n = (JSON.parse(String(v)) as unknown[]).length; } catch { /* shown as edited */ } return `Legs: edited${n ? ` (${n})` : ''}`; }
+      if (f.kind === 'level') return Number(v) === 0 && f.optional ? `${f.label}: off` : `${f.label}: ${fmtLevel(unitOf(f, params), Number(v))}`;
       if (f.zeroOff && Number(v) === 0) return `${f.label}: off`;
       return `${f.label}: ${f.prefix ?? ''}${v}${f.unit ?? ''}`;
     });

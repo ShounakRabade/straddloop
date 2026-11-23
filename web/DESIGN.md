@@ -73,11 +73,31 @@ full-width results area. Source: `app/lab/lab.css`, components in `components/la
 - **Tokens** (in `globals.css`): `--canvas` (results ground), `--rail` (settings ground), `--rule`, `--rule-2`,
   `--hover`, `--select-bg`; type steps `--t-xs` to `--t-lg`; radii `--r-sm` 4px and `--r` 6px; motion
   `--dur-1` 140ms (hover, toggles) and `--dur-2` 220ms (sections, drawer, panels).
-- **Rail.** 320–372px (`clamp(320px, 23vw, 372px)`), sticky under the 56px app bar, its own scroll, sections
-  A–F (Strategy, Market data, Backtest period, Capital & risk, Execution, Advanced). Each section header
+- **Rail.** 336–400px (`clamp(336px, 25vw, 400px)`), sticky under the 56px app bar, its own scroll, sections
+  A–F (Strategy & legs, Entry & exit, Risk rules, Data & period, Capital & execution, Advanced), each split
+  under sub-headings (`SUBGROUP` in `lib/labSections.ts`). Each section header
   states what is set inside it and badges what changed, what must be fixed and what needs a check. The
   footer holds the readiness checks and the Run button, always visible. Desktop collapses it to a 52px
   spine; below 1024px it is a drawer with a scrim and a fixed bottom bar (Settings, Run).
+- **Fields stay short.** A field shows its default and a reset only once it differs from the default (the
+  marker highlight says it changed); four or more choices, or long labels, are a dropdown, not a column of
+  radio rows. With every section open the rail is under 3,700px (checked by the e2e test).
+- **Times** (`TimeField`): an HH:MM box you can type into, steppers either side, and a grid of times at
+  1, 5, 15 or 30 minutes that filters as you type. Each field has the engine's grain (Strategy 01 enters on
+  5-minute candles) and bounds; a typed value off either is moved to the nearest allowed time and the
+  field says so. Three roles, one mark each, everywhere a time appears: entry a cobalt dot, last new entry
+  a marker diamond, square-off an ink square. `SessionLine` puts them on one 09:15–15:30 line; rule times
+  the engine fixes are drawn dashed. Out-of-order times block Run and badge the section.
+- **Stops and targets** (`LevelField`): the value is typed into a box with its unit beside it (%, pts,
+  ₹, ₹/lot, % prem, idx pts), with a unit switch when there is a choice and an On/Off switch when the
+  level is optional. The slider is logarithmic over wide ranges (₹100 to ₹10 lakh); arrow keys move by the
+  step. Bounds follow what a leg can lose (`lib/levels.ts`): a short leg's stop to 500%, a long leg's
+  below 100%.
+- **Builder legs** (`LegTable`): one row per leg (side, type, strike rule, size, stop, target), an
+  editor under the row, and the engine's own refusals (`legs.validate`, run in the page) listed under
+  the table, with the leg marked and Run blocked.
+- **Data status** (`DataStatus`): one line above the results (REAL DATA or SYNTHETIC, the series and
+  dates, the one caveat that always applies) with the assumptions behind every figure opening below it.
 - **Figures.** Mono, tabular. Green and red are for P&L only; a zero is never red. A figure the engine did
   not produce is an em dash with the reason beside it, never an estimate. Estimated figures carry an
   `EST.` tag.
@@ -85,6 +105,7 @@ full-width results area. Source: `app/lab/lab.css`, components in `components/la
   unverified list) and the expiry corner; the range comes only from `lib/dateRange.ts`.
 - **Motion.** Sections open by animating `grid-template-rows`; panels fade in 4px; nothing moves on
   scroll. `prefers-reduced-motion` turns all of it off.
-- **Layout guarantees** (checked by `tests/e2e/lab-ui.cjs` at 1920, 1366, 820 and 390px): no sideways
-  page scroll, no scroll boxes inside the results flow (wide tables scroll sideways in place), and the
+- **Layout guarantees** (checked by `tests/e2e/lab-ui.cjs` at 1920, 1366, 820 and 390px, and for sideways
+  scroll and rail clipping at 1280, 1366, 1440, 1536 and 1920px): no sideways page scroll, nothing cut off
+  inside the rail, no scroll boxes inside the results flow (wide tables scroll sideways in place), and the
   page is exactly as tall as the workspace.

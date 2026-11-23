@@ -6,7 +6,7 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Logo } from '@/components/ui';
-import { SYNTHETIC_KEYS, describeParams, type Field } from '@/lib/strategies';
+import { SYNTHETIC_KEYS, describeParams, fieldChanged, type Field } from '@/lib/strategies';
 import { CORE_BUILDER, GROUPS, REGISTRY, inGroup, labStrategy, slugOfResult } from '@/lib/strategyRegistry';
 import { useLab, type DayRef } from '@/lib/useLab';
 import { useSession } from '@/lib/useSession';
@@ -15,11 +15,18 @@ import { saveRun } from '@/lib/store';
 import { availability, download, readLocal, statuses, type Availability, type ExpiryFlag } from '@/lib/marketData';
 import { boundsOf, buildDateRange, presetRange, type InventoryDay, type StatusRow } from '@/lib/dateRange';
 import { ENGINE_ONLY_KEYS, PARAM_SPACE, choiceLabel } from '@/lib/researchSpace';
-import { STRATEGY_GROUP, sectionOf, type SectionId } from '@/lib/labSections';
+import { SECTIONS, SUBGROUP, sectionOf, type SectionId } from '@/lib/labSections';
+import { ROLE_LABEL, sequenceProblems, timeProblem, toMin, type TimeRole } from '@/lib/sessionTime';
+import { labCaps } from '@/lib/legs/caps';
+import type { Gate, TemplateId } from '@/lib/legs/types';
+import Legs from '@/public/engine/legs.js';
 import { GLOSSARY } from '@/lib/glossary';
 import { inr, shortDate } from '@/lib/format';
 import type { LabSlug, Params } from '@/lib/types';
-import { Icon, ParamField, Section, Tip } from '@/components/lab/kit';
+import { Icon, ParamField, Section, Tip, fmtVal } from '@/components/lab/kit';
+import { RoleMark, SessionLine, useTimeInterval } from '@/components/lab/TimeField';
+import { LegTable } from '@/components/lab/LegTable';
+import { DataStatus } from '@/components/lab/DataStatus';
 import { Calendar } from '@/components/lab/Calendar';
 import { ResearchPanel } from '@/components/research/ResearchPanel';
 import { Exec, ResultTabs, headline, type Baseline, type TabId } from '@/components/lab/Results';
@@ -30,25 +37,23 @@ const RAIL_KEY = 'straddloop.rail';
 const AUTO_KEY = 'straddloop.autorun';
 const TAB_IDS: TabId[] = ['overview', 'capital', 'charts', 'trades', 'sessions', 'replay', 'research', 'diagnostics', 'ledger'];
 const NO_STATUS: StatusRow[] = [];
+const ROLE_ORDER: TimeRole[] = ['entry', 'last_entry', 'exit'];
 type Source = 'synthetic' | 'real';
 type LocalDay = { path: string; date: string; buf?: ArrayBuffer };
 type Meta = { key: string; dataKey: string; isDefault: boolean };
 
 const GUIDE: { sec: SectionId | null; title: string; body: string }[] = [
-  { sec: 'strategy', title: 'Choose a strategy', body: 'A published rule set, or a structure from the strategy builder. Its legs and its entry and exit rules are listed under it.' },
-  { sec: 'data', title: 'Choose the market data', body: 'The synthetic model shows how a rule reacts to a setting. Real NIFTY candles show what the rule would have done on stored days.' },
-  { sec: 'period', title: 'Pick the period', body: 'On real data, pick dates on the calendar. Each day shows whether it is stored, partial, missing or a holiday, and the count of sessions that will run.' },
-  { sec: 'risk', title: 'Set capital and size', body: 'Starting capital, lots per leg, and what happens when margin is short. Margin is an estimate, never your broker’s figure.' },
-  { sec: 'strategy', title: 'Set the exit rules', body: 'Stops, targets and re-entry. A changed value shows its default next to it, with a reset.' },
-  { sec: 'execution', title: 'Check costs and fills', body: 'Slippage and brokerage are yours to set. Statutory charges follow the rates in force on each trade date.' },
-  { sec: 'advanced', title: 'Advanced rules (optional)', body: 'Entry-candle strictness, strike offset and breakout definitions. The defaults are the published rules.' },
+  { sec: 'strategy', title: 'Choose a strategy and its legs', body: 'A published rule set, or a structure from the strategy builder. Builder legs can be edited one by one: side, type, strike, size, stop and target.' },
+  { sec: 'timing', title: 'Set entry and exit', body: 'Entry, the last minute a new position may open, and the square-off, on one line from 09:15 to 15:30. Type a time or pick one; the order is checked as you go.' },
+  { sec: 'risk', title: 'Set stops and targets', body: 'Per leg and for the whole position, in %, premium points or rupees. Type the value or use the slider; the unit is always shown.' },
+  { sec: 'data', title: 'Choose the data and the period', body: 'The synthetic model shows how a rule reacts to a setting. Real NIFTY candles show what it would have done; pick the dates on the calendar.' },
+  { sec: 'capital', title: 'Check capital, costs and fills', body: 'Starting capital, what happens when margin is short, slippage and brokerage. Margin is an estimate, never your broker’s figure.' },
+  { sec: 'advanced', title: 'Advanced rules (optional)', body: 'The published rules’ finer points: entry-candle strictness, breakout definitions. The defaults are the published rules.' },
   { sec: null, title: 'Run and read the result', body: 'Run the backtest, then start with Overview: what happened, what worked, what hurt, and how far to trust it.' },
 ];
 
-const short = (f: Field, v: unknown) => {
-  if (f.kind === 'choice') return f.options.find((o) => o.value === v)?.label ?? String(v);
-  return `${f.prefix ?? ''}${f.prefix ? Number(v).toLocaleString('en-IN') : v}${(f.unit ?? '').trim() === 'from ATM' ? ' ATM' : f.unit ?? ''}`;
-};
+/** A field's value in a section summary: '09:50', '36%', '₹1,000/lot', '2 from ATM' reads '2 ATM'. */
+const short = (f: Field, v: unknown, p: Params) => fmtVal(f, v, p).replace(' from ATM', ' ATM');
 
 export function LabClient() {
   const [slug, setSlug] = useState<LabSlug>('straddle');
@@ -63,7 +68,7 @@ export function LabClient() {
   const [request, setRequest] = useState<{ from: string; to: string }>({ from: '', to: '' });
   const [loading, setLoading] = useState<{ done: number; total: number } | null>(null);
   const [dataErr, setDataErr] = useState<string | null>(null);
-  const [open, setOpen] = useState<Set<SectionId>>(() => new Set<SectionId>(['strategy', 'data', 'period']));
+  const [open, setOpen] = useState<Set<SectionId>>(() => new Set<SectionId>(['strategy', 'data']));
   const [rail, setRail] = useState<'open' | 'collapsed'>('open');
   const [drawer, setDrawer] = useState(false);
   const [narrow, setNarrow] = useState(false);
@@ -78,6 +83,7 @@ export function LabClient() {
   const [saved, setSaved] = useState<{ state: 'idle' | 'saving' | 'done' | 'error'; msg?: string }>({ state: 'idle' });
   const [beforeLoad, setBeforeLoad] = useState<Params | null>(null);  // the person's settings before they loaded a study's selection
   const lab = useLab();
+  const [timeStep, setTimeStep] = useTimeInterval();
   const { session, ready: sessionReady } = useSession();
   const strategy = labStrategy(slug) ?? REGISTRY[0];
   const isFourleg = strategy.engine === 'fourleg';
@@ -145,7 +151,9 @@ export function LabClient() {
     () => (real && inventory.length ? buildDateRange(request, inventory, statusRows, { source: local ? 'local' : 'dhan', series: flag }) : null),
     [real, inventory, statusRows, request, local, flag]);
 
-  const fields = useMemo(() => (real ? strategy.fields.filter((f) => !SYNTHETIC_KEYS.includes(f.key)) : strategy.fields), [real, strategy]);
+  // Builder legs edited by hand no longer use the structure's strike offset and width, so those two are hidden.
+  const legsEdited = strategy.family === 'builder' && typeof params.legs === 'string' && !!params.legs;
+  const fields = useMemo(() => strategy.fields.filter((f) => !(real && SYNTHETIC_KEYS.includes(f.key)) && !(legsEdited && (f.key === 'offset' || f.key === 'width'))), [real, strategy, legsEdited]);
   const changed = useMemo(() => describeParams({ ...strategy, fields }, params), [strategy, fields, params]);
   const lotSet = Number(params.lot_size) > 0;
   // Engine settings that have no field in the rail (set only by loading an optimisation study). Always listed, never silent.
@@ -155,7 +163,6 @@ export function LabClient() {
   const spaceLabel = (k: string) => [...PARAM_SPACE.straddle, ...PARAM_SPACE.orb].find((x) => x.key === k)?.label ?? k;
   const nChanged = changed.length + (lotSet ? 1 : 0) + engineSet.length;
   const realReady = !!range && range.runnable.length > 0;
-  const canRun = booted && !strategy.blocked && (real ? realReady : true);
 
   // What the run request carries: builder structures add their StrategySpec, built from these parameters.
   const runParams = useMemo((): Params => {
@@ -164,9 +171,29 @@ export function LabClient() {
     return { ...base, data_from: range.runnable[0], data_to: range.runnable[range.runnable.length - 1], data_flag: flag, range_key: range.key };
   }, [strategy, real, range, params, flag]);
   const configKey = useMemo(() => JSON.stringify([slug, real ? 'real' : 'syn', runParams]), [slug, real, runParams]);
+
+  // Times: each inside its own bounds and grain, and in order (entry before square-off, last new entry not after it).
+  const timeFields = fields.filter((f): f is Extract<Field, { kind: 'time' }> => f.kind === 'time');
+  const timeOwn = useMemo(() => timeFields.flatMap((f) => {
+    const t = timeProblem(toMin(params[f.key]), { min: toMin(f.min)!, max: toMin(f.max)!, grain: f.grain });
+    return t ? [{ key: f.key, level: 'error' as const, text: `${f.label}: ${t}` }] : [];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [fields, params]);
+  const timeSeq = useMemo(() => sequenceProblems(timeFields.map((f) => ({ key: f.key, role: f.role, value: toMin(params[f.key]) })), params.hold !== 'expiry'),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [fields, params]);
+  const timeChecks = [...timeOwn, ...timeSeq];
+  // Builder strategies: the engine's own checks on the spec this run would send, against what the data source holds.
+  const legGates = useMemo((): { errors: Gate[]; warnings: Gate[] } => {
+    if (strategy.family !== 'builder' || typeof runParams.spec !== 'string') return { errors: [], warnings: [] };
+    const v = Legs.validate(JSON.parse(runParams.spec), labCaps(real, flag));
+    return { errors: v.errors, warnings: v.warnings.filter((g) => g.code !== 'NO_BID_ASK' && g.code !== 'EXPIRY_ASSUMED') };
+  }, [strategy.family, runParams.spec, real, flag]);
+  const blockers = timeChecks.filter((c) => c.level === 'error').length + legGates.errors.length;
+  const canRun = booted && !strategy.blocked && !blockers && (real ? realReady : true);
   const dataKey = real ? `real:${flag}:${range?.key ?? ''}` : isFourleg ? `syn:${params.months}` : `syn:${params.days}:${params.seed}:${params.iv}`;
   const isDefault = useMemo(
-    () => strategy.fields.filter((f) => !SYNTHETIC_KEYS.includes(f.key) && f.key !== 'months').every((f) => params[f.key] === strategy.defaults[f.key]) && !lotSet && !engineSet.length,
+    () => strategy.fields.filter((f) => !SYNTHETIC_KEYS.includes(f.key) && f.key !== 'months').every((f) => !fieldChanged(f, params, strategy.defaults)) && !lotSet && !engineSet.length,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [strategy, params, lotSet, engineSet.length]);
 
@@ -304,26 +331,36 @@ export function LabClient() {
   };
 
   // ---------- per-section content, counts and summaries ----------
-  const inSec = (id: SectionId) => fields.filter((f) => sectionOf(f.key) === id);
-  const changedIn = (id: SectionId) => inSec(id).filter((f) => params[f.key] !== strategy.defaults[f.key]).length + (id === 'risk' && lotSet ? 1 : 0);
+  const inSec = (id: SectionId) => fields.filter((f) => sectionOf(f.key) === id && f.kind !== 'legs');
+  const changedIn = (id: SectionId) => inSec(id).filter((f) => fieldChanged(f, params, strategy.defaults)).length + (id === 'capital' && lotSet ? 1 : 0)
+    + (id === 'strategy' && legsEdited ? 1 : 0);
+  const problemOf = (key: string) => timeSeq.find((c) => c.key === key) ?? null;
   const field = (f: Field, warn?: string | null) => (
-    <ParamField key={f.key} f={f} value={params[f.key]} def={strategy.defaults[f.key]} onChange={(v) => set(f.key, v)} idPrefix={slug} tip={GLOSSARY[f.key] ?? f.help} warn={warn} />
+    <ParamField key={f.key} f={f} p={params} d={strategy.defaults} set={set} idPrefix={slug} tip={GLOSSARY[f.key] ?? f.help} warn={warn}
+      time={f.kind === 'time' ? { interval: timeStep, onInterval: setTimeStep, problem: problemOf(f.key) } : undefined} />
   );
+  /** A section's fields under their sub-headings, in the order the headings first appear. */
+  const grouped = (id: SectionId, skip: (f: Field) => boolean = () => false) => {
+    const fs = inSec(id).filter((f) => !skip(f));
+    const order: string[] = [];
+    for (const f of fs) { const g = SUBGROUP[f.key] ?? ''; if (!order.includes(g)) order.push(g); }
+    return order.flatMap((g) => [g ? <div className="sub-h" key={`h-${g}`}>{g}</div> : null, ...fs.filter((f) => (SUBGROUP[f.key] ?? '') === g).map((f) => field(f, f.key === 'slip_pct' && real && slip === 0 ? 'Zero slippage on real candles overstates results.' : null))]);
+  };
   const slip = Number(params.slip_pct ?? 0);
   const fileLot = range?.days.find((d) => d.file?.lot_size)?.file?.lot_size ?? null;
   const seriesName = flag === 'WEEK' ? 'weekly' : 'monthly';
   const periodText = real
     ? (range?.effective && range.runnable.length ? `${shortDate(range.runnable[0])} – ${shortDate(range.runnable[range.runnable.length - 1])} · ${range.runnable.length} sessions` : 'choose dates')
     : isFourleg ? `${params.months} months` : `${params.days} sessions`;
-  const dataErrors = real && !local && avail && avail.state !== 'ready' ? 1 : 0;
-  const periodErrors = real && range && !range.runnable.length ? 1 : 0;
+  const dataErrors = (real && !local && avail && avail.state !== 'ready' ? 1 : 0) + (real && range && !range.runnable.length ? 1 : 0);
   const periodWarn = !!range && (range.counts.partial > 0 || range.counts.missing > 0 || range.messages.some((m) => m.level === 'note' && /moved/.test(m.text)));
+  const sumOf = (id: SectionId, n: number) => inSec(id).slice(0, n).map((f) => short(f, params[f.key], params));
   const sectionSummary: Record<SectionId, string> = {
-    strategy: [strategy.short, ...inSec('strategy').slice(0, 2).map((f) => short(f, params[f.key]))].join(' · '),
-    data: real ? (local ? `${local.length} files from this computer` : `NSE · NIFTY · ${seriesName} · 1-min`) : isFourleg ? 'Synthetic · four stocks' : `Synthetic · seed ${params.seed} · IV ${params.iv}%`,
-    period: periodText,
-    risk: isFourleg ? 'Fixed in this model' : `${inr(Number(params.capital))} · ${params.lots} lot${Number(params.lots) === 1 ? '' : 's'} · ${short(fields.find((f) => f.key === 'margin_policy')!, params.margin_policy)}`,
-    execution: isFourleg ? 'Fixed in this model' : `slip ${slip}% · ₹${params.brokerage_per_order}/order`,
+    strategy: [strategy.short, legsEdited ? 'legs edited' : null, ...sumOf('strategy', 2)].filter(Boolean).join(' · '),
+    timing: timeFields.length ? timeFields.map((f) => `${f.role === 'entry' ? 'in' : f.role === 'exit' ? 'out' : 'last'} ${params[f.key]}`).join(' · ') : isFourleg ? 'Monthly: after each expiry' : sumOf('timing', 2).join(' · ') || 'Fixed by the rules',
+    risk: isFourleg ? sumOf('risk', 2).join(' · ') : inSec('risk').filter((f) => f.kind === 'level' && Number(params[f.key]) > 0).slice(0, 3).map((f) => short(f, params[f.key], params)).join(' · ') || 'No stops or targets',
+    data: real ? `${local ? `${local.length} files` : `NIFTY ${seriesName}`} · ${periodText}` : isFourleg ? `Synthetic · four stocks · ${periodText}` : `Synthetic · ${periodText} · seed ${params.seed}`,
+    capital: isFourleg ? 'Fixed in this model' : `${inr(Number(params.capital))} · slip ${slip}% · ₹${params.brokerage_per_order}/order`,
     advanced: inSec('advanced').length ? (changedIn('advanced') ? `${changedIn('advanced')} changed` : 'Published defaults') : 'None for this strategy',
   };
 
@@ -406,17 +443,17 @@ export function LabClient() {
             </div>
           )}
 
-          <Section id="strategy" letter="A" title="Strategy" summary={sectionSummary.strategy} open={open.has('strategy')} onToggle={() => toggleSec('strategy')} changed={changedIn('strategy')} dim={dim('strategy')}>
+          <Section id="strategy" letter="A" title={SECTIONS[0].title} summary={sectionSummary.strategy} open={open.has('strategy')} onToggle={() => toggleSec('strategy')} changed={changedIn('strategy')} errors={legGates.errors.length} dim={dim('strategy')}>
             <div className="strat-list" role="radiogroup" aria-label="Strategy">
               {inGroup('published').map((s) => (
                 <label key={s.slug} className="strat-opt">
                   <input type="radio" name="strategy" checked={s.slug === slug} onChange={() => pick(s.slug)} />
-                  <span className="n">{s.number}</span><b>{s.short}</b><small>{s.stance} · {s.engine === 'fourleg' ? 'four stocks, synthetic model only' : 'intraday, NIFTY options in the Lab'}</small>
+                  <span className="n">{s.number}</span><b>{s.short}</b><small>{s.engine === 'fourleg' ? 'stocks · synthetic' : s.stance}</small>
                 </label>
               ))}
               <label className="strat-opt">
                 <input type="radio" name="strategy" checked={strategy.family === 'builder'} onChange={() => pick(lastBuilder.current)} />
-                <span className="n">B</span><b>Strategy builder</b><small>{CORE_BUILDER.length} structures, single legs to iron condors · NIFTY options</small>
+                <span className="n">B</span><b>Strategy builder</b><small>{CORE_BUILDER.length} structures</small>
               </label>
             </div>
             {strategy.family === 'builder' && (
@@ -435,22 +472,39 @@ export function LabClient() {
                 <div className="f-meta"><span>{strategy.oneLine} {strategy.stance[0].toUpperCase() + strategy.stance.slice(1)}.</span></div>
               </div>
             )}
-            <div className="sub-h">{strategy.family === 'builder' ? 'Legs' : 'Legs (fixed for this strategy)'}</div>
-            <table className="legs">
-              <thead><tr><th>Action</th><th>Type</th><th>Strike</th><th>Qty</th><th>Expiry</th>{strategy.family === 'builder' && <th>Stop</th>}</tr></thead>
-              <tbody>{strategy.legs(params).map((l, i) => <tr key={i}><td>{l.action}</td><td>{l.right}</td><td>{l.strike}</td><td>{l.qty}</td><td>{l.expiry}</td>{strategy.family === 'builder' && <td>{l.stop}</td>}</tr>)}</tbody>
-            </table>
-            <dl className="ro"><dt>Entry</dt><dd>{strategy.entryText(params)}</dd><dt>Exit</dt><dd>{strategy.exitText(params)}</dd></dl>
-            {(['Exit', 'Adjustment', 'Structure'] as const).map((grp) => {
-              const fs = inSec('strategy').filter((f) => STRATEGY_GROUP[f.key] === grp);
-              return fs.length ? [<div className="sub-h" key={`h${grp}`}>{grp === 'Exit' ? 'Exit rules' : grp === 'Adjustment' ? 'Adjustments' : 'Structure'}</div>, ...fs.map((f) => field(f))] : null;
-            })}
-            {strategy.rulesHref
-              ? <p className="sec-note">Full rule text: <Link className="qlink" href={strategy.rulesHref}>{strategy.short} rules</Link>.</p>
-              : <p className="sec-note">Strikes count listed strikes from ATM (OTM for each leg&rsquo;s own side). Real data stores ATM ± 10, so a leg further out is refused with the reason. Expiry follows the series under Market data.</p>}
+            {strategy.family !== 'builder' && <p className="sec-note">{strategy.oneLine}</p>}
+            {strategy.family === 'builder'
+              ? <LegTable slug={slug as TemplateId} p={params} set={set} real={real} seriesName={seriesName} gates={[...legGates.errors, ...legGates.warnings]} />
+              : (
+                <>
+                  <div className="sub-h">Legs (fixed for this strategy)</div>
+                  <table className="legs">
+                    <thead><tr><th>Action</th><th>Type</th><th>Strike</th><th>Qty</th><th>Expiry</th></tr></thead>
+                    <tbody>{strategy.legs(params).map((l, i) => <tr key={i}><td>{l.action}</td><td>{l.right}</td><td>{l.strike}</td><td>{l.qty}</td><td>{l.expiry}</td></tr>)}</tbody>
+                  </table>
+                </>
+              )}
+            {grouped('strategy')}
+            {strategy.rulesHref && <p className="sec-note">Full rule text: <Link className="qlink" href={strategy.rulesHref}>{strategy.short} rules</Link>.</p>}
           </Section>
 
-          <Section id="data" letter="B" title="Market data" summary={sectionSummary.data} open={open.has('data')} onToggle={() => toggleSec('data')} errors={dataErrors} dim={dim('data')}>
+          <Section id="timing" letter="B" title={SECTIONS[1].title} summary={sectionSummary.timing} open={open.has('timing')} onToggle={() => toggleSec('timing')} changed={changedIn('timing')}
+            errors={timeChecks.filter((c) => c.level === 'error').length} warns={timeSeq.filter((c) => c.level === 'note').length} dim={dim('timing')}>
+            {timeFields.length > 0 && <SessionLine marks={[...timeFields.map((f) => ({ role: f.role, at: toMin(params[f.key]) })), ...strategy.fixedTimes.map((t) => ({ role: t.role, at: toMin(t.at), fixed: t.at }))]} />}
+            {[...timeFields].sort((a, b) => ROLE_ORDER.indexOf(a.role) - ROLE_ORDER.indexOf(b.role)).map((f) => field(f))}
+            {strategy.fixedTimes.map((t) => (
+              <div className="tf-fixed" key={t.role}><RoleMark role={t.role} /><span><b>{ROLE_LABEL[t.role]} {t.at}</b>, fixed: {t.why}</span></div>
+            ))}
+            <dl className="ro"><dt>Entry</dt><dd>{strategy.entryText(params)}</dd><dt>Exit</dt><dd>{strategy.exitText(params)}</dd></dl>
+            {grouped('timing', (f) => f.kind === 'time')}
+          </Section>
+
+          <Section id="risk" letter="C" title={SECTIONS[2].title} summary={sectionSummary.risk} open={open.has('risk')} onToggle={() => toggleSec('risk')} changed={changedIn('risk')} dim={dim('risk')}>
+            {inSec('risk').length ? grouped('risk') : <p className="sec-note">This strategy has no stop or target settings.</p>}
+            {strategy.family === 'builder' && <p className="sec-note">A single leg can have its own stop or target, or none: edit it in the legs table under A.</p>}
+          </Section>
+
+          <Section id="data" letter="D" title={SECTIONS[3].title} summary={sectionSummary.data} open={open.has('data')} onToggle={() => toggleSec('data')} errors={dataErrors} warns={periodWarn ? 1 : 0} dim={dim('data')}>
             <fieldset className="f" style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
               <div className="f-top"><legend className="f-label" style={{ padding: 0, float: 'left' }}>Source</legend><Tip label="Source" text="The synthetic model is a labelled imaginary market with dates in 2099. Real data is stored Dhan 1-minute NIFTY option and index candles." /></div>
               <div className="seg2">
@@ -458,15 +512,10 @@ export function LabClient() {
                 <label><input type="radio" name="source" checked={real} disabled={!realOk} onChange={() => pickSource('real')} /><span>Real NIFTY (Dhan)</span></label>
               </div>
               {!realOk && <div className="f-meta">Real data covers NIFTY index options only, so the four-leg stock strategy stays synthetic.</div>}
+              {!strategy.syntheticOk && <div className="f-meta">This strategy needs real NIFTY index and option history.</div>}
             </fieldset>
             {real ? (
               <>
-                <dl className="ro">
-                  <dt>Exchange</dt><dd>NSE</dd>
-                  <dt>Underlying</dt><dd>NIFTY 50 index options</dd>
-                  <dt>Candles</dt><dd>1-minute, from Dhan; no bid/ask</dd>
-                  <dt>Stored</dt><dd>{local ? `${local.length} files from this computer` : avail?.state === 'ready' ? `${avail.days.length} ${seriesName} days, ${shortDate(avail.days[0].trade_date)} to ${shortDate(avail.days[avail.days.length - 1].trade_date)}` : avail ? '—' : 'checking…'}</dd>
-                </dl>
                 {!local && (
                   <div className="f">
                     <div className="f-top"><span className="f-label">Expiry series</span><Tip label="Expiry series" text="Which option contracts the day files hold: the nearest weekly expiry, or the monthly one. Expiry dates are assumed from the weekday rule until checked against NSE." /></div>
@@ -478,39 +527,28 @@ export function LabClient() {
                 )}
                 {!local && avail?.state === 'off' && <p className="sec-err">{offMessage(avail.why)}</p>}
                 {!local && avail?.state === 'empty' && <p className="sec-err">No {seriesName} days are uploaded yet. Run <code>straddloop supabase-upload</code> on your computer.</p>}
-                {local
-                  ? <button type="button" className="qlink" style={{ justifySelf: 'start' }} onClick={() => { setLocal(null); sent.current.clear(); setRequest({ from: '', to: '' }); }}>Use the stored Supabase data instead</button>
-                  : <label className="qlink" style={{ cursor: 'pointer', justifySelf: 'start' }}>Load day files from this computer<input type="file" accept=".gz" multiple className="sr" onChange={(e) => pickFiles(e.target.files)} /></label>}
-                <p className="sec-note">Only NIFTY options are stored. Other underlyings, stocks and futures are not supported on real data yet.</p>
+                {inventory.length
+                  ? <Calendar inventory={inventory} statuses={statusRows} source={local ? 'local' : 'dhan'} series={flag} request={request} onChange={setRequest} range={range} outcomes={outcomes} />
+                  : <p className="sec-note">{!local && !avail ? 'Checking which days are stored…' : 'The calendar opens once stored days are available.'}</p>}
+                <p className="sec-note">
+                  {local ? `${local.length} day files from this computer. ` : avail?.state === 'ready' ? `${avail.days.length} ${seriesName} days stored, ${shortDate(avail.days[0].trade_date)} to ${shortDate(avail.days[avail.days.length - 1].trade_date)}. ` : ''}
+                  {local
+                    ? <button type="button" className="qlink" onClick={() => { setLocal(null); sent.current.clear(); setRequest({ from: '', to: '' }); }}>Use the stored data instead</button>
+                    : <label className="qlink" style={{ cursor: 'pointer' }}>Load day files from this computer<input type="file" accept=".gz" multiple className="sr" onChange={(e) => pickFiles(e.target.files)} /></label>}
+                </p>
               </>
             ) : (
               <>
-                {inSec('data').map((f) => field(f))}
-                <dl className="ro">
-                  <dt>Model</dt><dd>{isFourleg ? 'Four imaginary stocks, daily, monthly options' : 'An imaginary NIFTY-like index, 1-minute; realised vol 12%'}</dd>
-                  <dt>Dates</dt><dd>in 2099, so they cannot be mistaken for history</dd>
-                </dl>
+                {grouped('data')}
+                <p className="sec-note">Synthetic sessions are generated from the seed, dated in 2099. Pick Real NIFTY to choose calendar dates.</p>
               </>
             )}
           </Section>
 
-          <Section id="period" letter="C" title="Backtest period" summary={sectionSummary.period} open={open.has('period')} onToggle={() => toggleSec('period')} errors={periodErrors} warns={periodWarn ? 1 : 0} dim={dim('period')}>
-            {real ? (
-              inventory.length
-                ? <Calendar inventory={inventory} statuses={statusRows} source={local ? 'local' : 'dhan'} series={flag} request={request} onChange={setRequest} range={range} outcomes={outcomes} />
-                : <p className="sec-note">{!local && !avail ? 'Checking which days are stored…' : 'The calendar opens once stored days are available (see Market data).'}</p>
-            ) : (
+          <Section id="capital" letter="E" title={SECTIONS[4].title} summary={sectionSummary.capital} open={open.has('capital')} onToggle={() => toggleSec('capital')} changed={changedIn('capital')} warns={real && slip === 0 ? 1 : 0} dim={dim('capital')}>
+            {isFourleg ? <p className="sec-note">The four-leg model uses its own synthetic margin and charges (₹20 an order plus statutory charges inside the model). It has no account settings.</p> : (
               <>
-                {inSec('period').map((f) => field(f))}
-                <p className="sec-note">Synthetic sessions are generated from the seed. Pick Real NIFTY under Market data to choose calendar dates.</p>
-              </>
-            )}
-          </Section>
-
-          <Section id="risk" letter="D" title="Capital & risk" summary={sectionSummary.risk} open={open.has('risk')} onToggle={() => toggleSec('risk')} changed={changedIn('risk')} dim={dim('risk')}>
-            {isFourleg ? <p className="sec-note">The four-leg model sizes three short lots against the protective lots (Strategy) and uses its own synthetic margin. It has no account settings.</p> : (
-              <>
-                {inSec('risk').filter((f) => f.key === 'capital' || f.key === 'lots').map((f) => field(f))}
+                {inSec('capital').filter((f) => f.key === 'capital').map((f) => field(f))}
                 <div className="f" data-changed={lotSet}>
                   <div className="f-top">
                     <label className="f-label" htmlFor="lab-lot">Lot size</label><span className="tag-opt">optional</span>
@@ -524,27 +562,14 @@ export function LabClient() {
                     </>
                   ) : <div className="f-meta">75, fixed in the synthetic model.</div>}
                 </div>
-                <div className="sub-h">Margin <span className="est2">estimated</span></div>
-                {inSec('risk').filter((f) => f.key !== 'capital' && f.key !== 'lots').map((f) => field(f))}
+                {grouped('capital', (f) => f.key === 'capital')}
+                <p className="sec-note">How fills, charges and margin are modelled: Assumptions, above the results.</p>
               </>
             )}
           </Section>
 
-          <Section id="execution" letter="E" title="Execution" summary={sectionSummary.execution} open={open.has('execution')} onToggle={() => toggleSec('execution')} changed={changedIn('execution')} warns={real && slip === 0 ? 1 : 0} dim={dim('execution')}>
-            {isFourleg ? <p className="sec-note">This model charges ₹20 an order plus statutory charges at fixed rates inside the model. It has no execution settings.</p> : (
-              <>
-                {inSec('execution').map((f) => field(f, f.key === 'slip_pct' && real && slip === 0 ? 'Zero slippage on real candles overstates results.' : null))}
-                <dl className="ro">
-                  <dt>Fills <Tip label="Fill model" text={GLOSSARY.fill_model ?? 'Candle price plus slippage.'} /></dt><dd>Candle price, worsened by the slippage above; stops pay it twice</dd>
-                  <dt>Charges <Tip label="Charges" text={GLOSSARY.charges ?? 'Statutory charges.'} /></dt><dd>STT, exchange, SEBI, stamp and GST at the rates in force on each trade date</dd>
-                  <dt>Order book</dt><dd>None: there is no bid/ask history, so fills are optimistic</dd>
-                </dl>
-              </>
-            )}
-          </Section>
-
-          <Section id="advanced" letter="F" title="Advanced" summary={sectionSummary.advanced} open={open.has('advanced')} onToggle={() => toggleSec('advanced')} changed={changedIn('advanced')} dim={dim('advanced')}>
-            {inSec('advanced').length ? inSec('advanced').map((f) => field(f)) : <p className="sec-note">This strategy has no advanced settings.</p>}
+          <Section id="advanced" letter="F" title={SECTIONS[5].title} summary={sectionSummary.advanced} open={open.has('advanced')} onToggle={() => toggleSec('advanced')} changed={changedIn('advanced')} dim={dim('advanced')}>
+            {inSec('advanced').length ? grouped('advanced') : <p className="sec-note">This strategy has no advanced settings.</p>}
           </Section>
 
           {(engineSet.length > 0 || beforeLoad) && (
@@ -571,22 +596,9 @@ export function LabClient() {
 
       <main id="lab-main" className="ws-main" aria-busy={busy}>
         <div className="ws-inner">
-          {real ? (
-            <div className="ws-notice" data-kind="real" role="note">
-              <span className="stamp2">Real data</span>
-              <span>NIFTY 1-minute option candles from Dhan{r?.data ? `, ${shortDate(r.data.from)} to ${shortDate(r.data.to)} (${r.data.days} sessions)` : ''}. <b>Fills are candle prices plus {slip}% slippage, so they are optimistic.</b></span>
-              {strategy.syntheticOk && <button type="button" className="qlink" onClick={() => pickSource('synthetic')}>Use synthetic</button>}
-              <details><summary>What this assumes</summary>
-                <p>There is no bid/ask history, so a real order could fill worse, especially on stops. Expiry dates follow the weekday rule and lot size {r?.data ? r.data.lot_sizes.join('/') : ''} is {r?.data?.lot_source.startsWith('set') ? 'set by you' : 'taken from the day files'} until checked against NSE bhavcopy. Margin is an estimate. Not investment advice.</p>
-              </details>
-            </div>
-          ) : (
-            <div className="ws-notice" role="note">
-              <span className="stamp2">Synthetic</span>
-              <span>Synthetic model, dates in 2099. It shows how a rule reacts to a setting; it is not evidence about NIFTY or any stock. Not investment advice.</span>
-              {realOk && <button type="button" className="qlink" onClick={() => { pickSource('real'); showSec('period'); }}>Use real NIFTY data</button>}
-            </div>
-          )}
+          <DataStatus real={real} local={local ? local.length : null} r={r} slip={slip} brokerage={Number(params.brokerage_per_order ?? 20)} seriesName={seriesName} family={strategy.family}
+            syn={{ days: Number(params.days), seed: Number(params.seed), iv: Number(params.iv), months: Number(params.months), fourleg: isFourleg }}
+            onSwitch={real ? (strategy.syntheticOk ? { label: 'Use synthetic', go: () => pickSource('synthetic') } : null) : realOk ? { label: 'Use real NIFTY data', go: () => { pickSource('real'); showSec('data'); } } : null} />
 
           {lab.status === 'error' ? (
             <div className="ws-empty" role="alert">
@@ -601,7 +613,7 @@ export function LabClient() {
               <span className="lbl">Nothing to run yet</span>
               <h2>{!local && !avail ? 'Checking which days are stored' : 'No real days to run'}</h2>
               <p>{!local && avail?.state === 'off' ? offMessage(avail.why) : !local && avail?.state === 'empty' ? `No ${seriesName} days are uploaded yet.` : range?.messages.find((m) => m.level === 'error')?.text ?? 'Pick a period with stored days, or load day files from this computer.'}</p>
-              {(local || avail) && <div className="run-actions">{(local || avail?.state === 'ready') && <button type="button" className="qbtn" onClick={() => showSec('period')}>Open the calendar</button>}{strategy.syntheticOk && <button type="button" className="qbtn" onClick={() => pickSource('synthetic')}>Use the synthetic model</button>}</div>}
+              {(local || avail) && <div className="run-actions">{(local || avail?.state === 'ready') && <button type="button" className="qbtn" onClick={() => showSec('data')}>Open the calendar</button>}{strategy.syntheticOk && <button type="button" className="qbtn" onClick={() => pickSource('synthetic')}>Use the synthetic model</button>}</div>}
             </div>
           ) : !r ? (
             busy || (autoOn && canRun) ? (

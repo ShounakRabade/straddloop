@@ -2,9 +2,12 @@
  *   NEXT_PUBLIC_SUPABASE_URL=https://stubproject.supabase.co NEXT_PUBLIC_SUPABASE_ANON_KEY=sb_publishable_test npm run build
  *   npx next start -p 3123 &
  *   BASE=http://localhost:3123 DAYFILES=/path/to/dayfiles/NIFTY/WEEK SHOTS=/tmp/lab-ui node tests/e2e/lab-ui.cjs
+ * Uses `playwright` (npx playwright install chromium), or `playwright-core` with an installed browser: PW_CHANNEL=msedge.
  * Supabase is replaced by tests/e2e/supabaseMock.cjs (10 stored NIFTY weekly days, 6–17 Oct 2025; status table absent).
  * Day files in DAYFILES must be synthetic sessions in the real file format. */
-const { chromium } = require('playwright');
+let pw;
+try { pw = require('playwright'); } catch { pw = require('playwright-core'); }
+const { chromium } = pw;
 const fs = require('fs'), path = require('path'), assert = require('assert');
 const { mockSupabase } = require('./supabaseMock.cjs');
 const BASE = process.env.BASE || 'http://localhost:3123', SHOTS = process.env.SHOTS || '/tmp/lab-ui', DAYS = process.env.DAYFILES;
@@ -30,10 +33,12 @@ const layout = (page) => page.evaluate(() => {
 const narrow = (w) => w < 1024;
 const openSettings = async (page, w) => { if (narrow(w)) { await page.locator('.ws-mbar .qbtn').click(); await page.locator('.ws[data-drawer="open"]').waitFor(); await page.waitForTimeout(300); } };
 const closeSettings = async (page, w) => { if (narrow(w)) { await page.keyboard.press('Escape'); await page.locator('.ws[data-drawer="closed"]').waitFor(); } };
+/** Types into a box the way a person does: scroll to it, click, replace its text. */
+const typeIn = async (loc, text) => { await loc.scrollIntoViewIfNeeded(); await loc.click(); await loc.fill(text); };
 const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rail-foot .run-btn');
 
 (async () => {
-  const browser = await chromium.launch();
+  const browser = await chromium.launch(process.env.PW_CHANNEL ? { channel: process.env.PW_CHANNEL } : {});
   const errors = [];
   const ctxFor = async (w, h, opts = {}) => {
     const ctx = await browser.newContext({ viewport: { width: w, height: h }, reducedMotion: opts.reducedMotion });
@@ -101,7 +106,7 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
         await page.locator('.ws[data-drawer="closed"]').waitFor();
       } else {
         const before = (await page.locator('.ws-rail').boundingBox()).width;
-        assert(before >= 318 && before <= 382, `rail width ${before}px is outside 320–380`);
+        assert(before >= 334 && before <= 402, `rail width ${before}px is outside 336–400`);
         await page.locator('.rail-head .ib').click();
         await page.locator('.ws[data-rail="collapsed"]').waitFor();
         assert((await page.locator('.ws-rail').boundingBox()).width <= 60, 'collapsed rail is a thin spine');
@@ -162,7 +167,7 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
         await page.goto(BASE + '/lab?data=real');
         await page.locator('.cal-grid').waitFor({ state: 'attached', timeout: 20000 });
         await openSettings(page, w);
-        await page.locator('#sec-period').scrollIntoViewIfNeeded();
+        await page.locator('#sec-data').scrollIntoViewIfNeeded();
         const t = await page.locator('.rail-checks').innerText();
         assert(/10 sessions will run/.test(t), t);
         assert(/17 Oct 2025/.test(t), 'end is the latest stored day, from the data');
@@ -199,6 +204,7 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
       });
       await step(`${name}: changing a rule marks the result stale instead of silently re-running real data`, async () => {
         await openSettings(page, w);
+        if (await page.locator('#sec-risk-h').getAttribute('aria-expanded') === 'false') await page.locator('#sec-risk-h').click();
         const slider = page.locator('#straddle-sl_pct');
         await slider.scrollIntoViewIfNeeded();
         await slider.focus();
@@ -209,11 +215,11 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
         await page.locator('.stale', { hasText: 'earlier settings' }).waitFor({ state: 'detached', timeout: 30000 });
         assert(await page.locator('.exec .m-d').count() > 0, 'comparison with the default-rules baseline shown');
       });
-      await step(`${name}: the guided setup walks eight steps and can be left at any point`, async () => {
+      await step(`${name}: the guided setup walks seven steps and can be left at any point`, async () => {
         await openSettings(page, w);
         await page.locator('.rail-head button', { hasText: 'Guide me' }).click();
-        for (let i = 1; i < 8; i++) {
-          assert(new RegExp(`Step ${i} of 8`, 'i').test(await page.locator('.guide').innerText()));
+        for (let i = 1; i < 7; i++) {
+          assert(new RegExp(`Step ${i} of 7`, 'i').test(await page.locator('.guide').innerText()));
           await page.locator('.guide-nav button', { hasText: 'Next' }).click();
         }
         await page.locator('.guide-nav button', { hasText: 'Run now' }).waitFor();
@@ -224,6 +230,114 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
       await ctx.close();
     }
   }
+
+  // ---- the configuration controls (Stage 2): time picker, stop/target levels, builder legs, layout at desktop widths
+  await step('time picker: typing, the interval list, the grain and the order of times are all enforced', async () => {
+    const { ctx, page } = await ctxFor(1440, 900);
+    await page.goto(BASE + '/lab');
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    await page.locator('#sec-timing-h').click();
+    const entry = page.locator('#straddle-entry_time');
+    await entry.waitFor();
+    // typing a time off the 5-minute grid snaps to it and says so
+    await typeIn(entry, '1002'); await entry.press('Enter');
+    assert.strictEqual(await entry.inputValue(), '10:00');
+    assert(/not allowed here; set to 10:00/.test(await page.locator('.tf[data-role="entry"] .f-meta').innerText()), 'snap note shown');
+    // the list: 15-minute steps, filtered by typing, picked with the keyboard
+    await page.locator('.tf[data-role="entry"] .tf-open').click();
+    await page.locator('.tf-iv button', { hasText: '15 min' }).click();
+    const listed = await page.locator('.tf-grid [role="option"]').allInnerTexts();
+    assert(listed.includes('10:15') && !listed.includes('10:05'), '15-minute list');
+    await typeIn(entry, '103'); assert.deepStrictEqual(await page.locator('.tf-grid [role="option"]').allInnerTexts(), ['10:30'], 'typing 103 filters the 15-minute list to 10:30');
+    await entry.press('ArrowDown'); await entry.press('Enter');
+    assert.strictEqual(await entry.inputValue(), '10:30');
+    // order: an entry after the square-off is an error and blocks Run
+    await typeIn(entry, '15:00'); await entry.press('Enter');
+    const exit = page.locator('#straddle-exit_time');
+    await typeIn(exit, '14:00'); await exit.press('Enter');
+    await page.locator('.tf[data-role="entry"] .f-meta [role="alert"]', { hasText: 'before the square-off' }).waitFor();
+    assert(await page.locator('.rail-foot .run-btn').isDisabled(), 'Run is disabled while the times are out of order');
+    assert(/\d to fix/.test(await page.locator('#sec-timing-h').innerText()), 'section badge counts the problems');
+    await typeIn(exit, '15:15'); await exit.press('Enter');
+    await page.locator('.rail-foot .run-btn:not([disabled])').waitFor();
+    await ctx.close();
+  });
+  await step('stops and targets: typed values with units, a wide range, a unit switch and an off switch', async () => {
+    const { ctx, page } = await ctxFor(1440, 900);
+    await page.goto(BASE + '/lab');
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    await page.locator('#sec-risk-h').click();
+    const sl = page.locator('#straddle-sl_pct-n');
+    await typeIn(sl, '250'); await sl.press('Enter');
+    assert.strictEqual(await sl.inputValue(), '250', 'a 250% stop is allowed (was capped at 75%)');
+    await typeIn(sl, '900'); await sl.press('Enter');
+    assert.strictEqual(await sl.inputValue(), '500');
+    assert(/outside 5%–500%/.test(await page.locator('#sec-risk .lf').first().innerText()), 'clamp explained');
+    const cap = page.locator('#straddle-max_loss_per_lot-on');
+    await cap.check();
+    assert(Number((await page.locator('#straddle-max_loss_per_lot-n').inputValue()).replace(/,/g, '')) > 0, 'the loss cap switched on with a value');
+    // the builder: one field in four units
+    await page.goto(BASE + '/lab?s=short_strangle');
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    await page.locator('#sec-risk-h').click();
+    await page.locator('#short_strangle-short_sl-on').check();
+    await page.locator('#sec-risk .lf-units').first().locator('button', { hasText: '₹/lot' }).click();
+    const v = page.locator('#short_strangle-short_sl-n');
+    await typeIn(v, '2500'); await v.press('Tab');
+    assert.strictEqual(await v.inputValue(), '2,500', 'grouped when not being edited');
+    assert((await page.locator('#sec-risk-h').innerText()).includes('₹2,500/lot'), 'the section summary reads ₹2,500/lot');
+    await ctx.close();
+  });
+  await step('builder legs: edit a leg, the engine refuses a strike outside the stored window with the reason, reset', async () => {
+    const { ctx, page } = await ctxFor(1440, 900);
+    await page.goto(BASE + '/lab?s=iron_condor');
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    assert.strictEqual(await page.locator('.lt-t tbody tr').count(), 4);
+    await page.locator('.lt-ed-btn').nth(3).click();
+    const steps = page.locator('.lt-edit .lt-strike input').first();
+    await typeIn(steps, '9'); await steps.press('Enter');
+    await typeIn(steps, '16'); await steps.press('Enter');
+    assert.strictEqual(await steps.inputValue(), '10', 'ATM offset capped at 10 in the editor');
+    // a leg relative to another, too far out: the engine's own check names the leg
+    await page.locator('.lt-edit select').first().selectOption('leg');
+    const rel = page.locator('.lt-edit .lt-strike input').first();
+    await typeIn(rel, '16'); await rel.press('Enter'); // L3 is 2 strikes out: 2 + 16 = 18, past the synthetic chain's ATM ± 15
+    await page.locator('.lt-gates', { hasText: /L4 is \d+ strikes from ATM; only ATM ± 15 is stored/ }).waitFor();
+    assert(await page.locator('.rail-foot .run-btn').isDisabled(), 'Run is disabled while a leg is refused');
+    assert(await page.locator('.lt-t tr[data-bad]').count() >= 1, 'the leg row is marked');
+    await page.locator('.lt-actions .qbtn', { hasText: 'Reset' }).click();
+    await page.locator('.lt-gates').waitFor({ state: 'detached' });
+    await page.locator('.rail-foot .run-btn:not([disabled])').waitFor();
+    await ctx.close();
+  });
+  await step('data status: one line with the caveat, the assumptions open below it', async () => {
+    const { ctx, page } = await ctxFor(1366, 768);
+    await page.goto(BASE + '/lab');
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    const h = (await page.locator('.ds-line').boundingBox()).height;
+    assert(h <= 44, `status line is ${h}px tall`);
+    assert(/not evidence about NIFTY/.test(await page.locator('.ds-line').innerText()));
+    await page.locator('.ds-line .qlink', { hasText: 'Assumptions' }).click();
+    assert(/Fills/.test(await page.locator('.ds-panel').innerText()));
+    await ctx.close();
+  });
+  await step('desktop widths 1280–1920: no sideways scroll, nothing clipped in the rail, the rail stays short', async () => {
+    for (const w of [1280, 1366, 1440, 1536, 1920]) {
+      const { ctx, page } = await ctxFor(w, 800);
+      for (const s of ['straddle', 'iron_condor']) {
+        await page.goto(`${BASE}/lab?s=${s}`);
+        await page.locator('.exec').waitFor({ timeout: 30000 });
+        for (const id of ['strategy', 'timing', 'risk', 'data', 'capital', 'advanced']) { const h = page.locator(`#sec-${id}-h`); if (await h.getAttribute('aria-expanded') === 'false') await h.click(); }
+        await page.waitForTimeout(350);
+        const l = await layout(page);
+        assert(l.sideways <= 1, `${w}px ${s}: page scrolls sideways by ${l.sideways}px`);
+        const rb = await page.locator('.rail-body').evaluate((e) => [e.scrollWidth, e.clientWidth, e.scrollHeight]);
+        assert(rb[0] <= rb[1] + 1, `${w}px ${s}: rail content is wider than the rail (${rb[0]} > ${rb[1]})`);
+        assert(rb[2] <= 3700, `${w}px ${s}: every rail section open is ${rb[2]}px tall`);
+      }
+      await ctx.close();
+    }
+  });
 
   await step('loading state: progress is shown while day files download', async () => {
     const { ctx, page } = await ctxFor(1366, 768);

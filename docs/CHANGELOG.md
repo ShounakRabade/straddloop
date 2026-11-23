@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased: Lab configuration controls and layout
+
+* **Times.** Entry, last new entry and square-off are picked with a time field instead of long lists: type
+  `930` or `9:30`, step with the arrows, or open a grid of times at 1, 5, 15 or 30 minutes that filters as you
+  type. Each time keeps to its engine's grain and bounds (Strategy 01 enters on 5-minute candles from 09:50) and
+  says so when a typed value is moved. The three roles have their own marks on a 09:15–15:30 line; times out of
+  order block Run with the reason. Strategy 01's re-entry cutoff (14:30) is now a field, and EMA pullback's fixed
+  14:00 last entry is shown.
+* **Stops and targets.** A typed value beside its unit, a slider (logarithmic over wide ranges) and, where it is
+  optional, an On/Off switch. Strategy 01's stop goes to 500% (was 75%) and its target from ₹100 to ₹50,000 a lot
+  (was ₹500–3,000); its daily loss cap per lot is now a field (off by default, as in the published rules). ORB's
+  target goes to 500 points; EMA pullback's stop is any value from 3 to 150 index points. Builder strategies set a
+  stop and a target for short legs and for long legs in %, premium points, ₹ or ₹ per lot, and a position stop and
+  target in ₹ per lot, ₹ in total or % of the net premium.
+* **Builder legs.** A legs table with an editor per leg: side, type, strike (from ATM, from another leg, by
+  premium, % from spot; by delta on the synthetic model only), size, expiry, and the leg's own stop and target
+  or none. Legs can be added (up to six) and reset. The engine's own checks run in the page as you edit, so a
+  leg outside the stored strikes is refused with the reason before anything runs.
+* **Data status.** The tall REAL DATA banner is one line (source, series, dates, the optimistic-fills caveat)
+  with the assumptions behind every figure opening below it.
+* **Rail.** Sections are now A Strategy & legs, B Entry & exit, C Risk rules, D Data & period, E Capital &
+  execution, F Advanced. A field shows its default only once changed, and long option lists are dropdowns. With
+  every section open the rail is about 45% shorter (2,700–3,350px, was 4,600–6,200px). No sideways scroll or
+  clipped rail content at 1280, 1366, 1440, 1536 or 1920px (checked by the e2e test).
+* Fixed: after typing an out-of-range stop, clicking the next control could miss, because leaving the box
+  removed its note and moved the layout under the pointer.
+* Tests: `tests/controls.test.mts` (time parsing, grain, order rules, level bounds and the slider scale), more
+  registry tests (units, per-leg overrides, edited legs), and new browser steps in `tests/e2e/lab-ui.cjs`, which
+  can now run on `playwright-core` with an installed browser (`PW_CHANNEL=msedge`).
+
 ## Unreleased: strategy builder in the Lab
 
 * The Lab's strategy list has a **Strategy builder** beside the four published rule sets: 16 structures (long and
