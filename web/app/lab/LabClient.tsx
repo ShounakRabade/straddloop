@@ -32,6 +32,10 @@ import { RollingView, type RollingState } from '@/components/lab/RollingView';
 import { Calendar } from '@/components/lab/Calendar';
 import { ResearchPanel } from '@/components/research/ResearchPanel';
 import { Exec, ResultTabs, headline, type Baseline, type TabId } from '@/components/lab/Results';
+import { OptimiseView } from '@/components/optimise/OptimiseView';
+import { useOptimiser, type LoadDays } from '@/lib/optimiser/useOptimiser';
+import { configParams } from '@/lib/optimiser/controller';
+import type { StudyConfig, StudyData } from '@/lib/optimiser/store';
 
 const OPEN_KEY = 'straddloop.open';
 const SOURCE_KEY = 'straddloop.source';
@@ -86,6 +90,23 @@ export function LabClient() {
   const [saved, setSaved] = useState<{ state: 'idle' | 'saving' | 'done' | 'error'; msg?: string }>({ state: 'idle' });
   const [beforeLoad, setBeforeLoad] = useState<Params | null>(null);  // the person's settings before they loaded a study's selection
   const lab = useLab();
+  const [view, setView] = useState<'results' | 'optimise'>('results');
+  const localRef = useRef<LocalDay[] | null>(null);
+  localRef.current = local;
+  // the optimiser's own copy of the study's day files (the Lab worker keeps its copy decoded, not as files)
+  const loadDays: LoadDays = useCallback(async (d, onProgress) => {
+    const paths = d.paths ?? [];
+    if (d.source === 'local') {
+      const have = new Map((localRef.current ?? []).map((x) => [x.path, x.buf]));
+      if (paths.some((p) => !have.get(p))) throw new Error(`This study ran on ${paths.length} day files from this computer (${d.from} to ${d.to}). Load those files again to continue it or draw its curves.`);
+      return paths.map((p) => ({ path: p, buf: (have.get(p) as ArrayBuffer).slice(0) }));
+    }
+    const got = await download(paths, (done) => onProgress(done, paths.length));
+    const by = new Map(got.map((g) => [g.path, g.buf]));
+    return paths.map((p) => ({ path: p, buf: by.get(p)! }));
+  }, []);
+  const opt = useOptimiser(loadDays);
+  const pendingRun = useRef(false);
   const [timeStep, setTimeStep] = useTimeInterval();
   const { session, ready: sessionReady } = useSession();
   const strategy = labStrategy(slug) ?? REGISTRY[0];
@@ -200,6 +221,14 @@ export function LabClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [strategy, params, lotSet, engineSet.length]);
 
+  const studyData = useMemo((): StudyData | null => {
+    if (!real) return isFourleg ? null : { source: 'synthetic', label: `Synthetic · seed ${params.seed}`, from: null, to: null, sessions: Number(params.days) || 120, key: dataKey,
+      synthetic: { days: Number(params.days) || 120, seed: Number(params.seed) || 1, iv: Number(params.iv) || 13 }, lotSize: 0 };
+    if (!range || !range.runnable.length) return null;
+    return { source: local ? 'local' : 'dhan', label: `Real NIFTY ${flag === 'WEEK' ? 'weekly' : 'monthly'}${local ? ' · files from this computer' : ''}`, from: range.runnable[0], to: range.runnable[range.runnable.length - 1],
+      sessions: range.runnable.length, key: dataKey, paths: range.files.map((f) => f.path), lotSize: Number(params.lot_size) || 0 };
+  }, [real, isFourleg, params.seed, params.days, params.iv, params.lot_size, dataKey, range, local, flag]);
+
   const runNow = useCallback(async () => {
     if (!canRun || loading) return;
     setTried(configKey);
@@ -230,6 +259,12 @@ export function LabClient() {
   }, [canRun, loading, configKey, dataKey, isDefault, real, lab, range, local, runParams]);
   const runRef = useRef(runNow);
   runRef.current = runNow;
+  // "Run a backtest" from a study: run once the loaded settings (and their period) are in place
+  useEffect(() => {
+    if (!pendingRun.current || !canRun || lab.status === 'running' || loading) return;
+    pendingRun.current = false;
+    runRef.current();
+  }, [configKey, canRun, lab.status, loading]);
 
   // A finished run: remember which settings produced it, and keep the default rules as the baseline.
   useEffect(() => {
@@ -328,6 +363,19 @@ export function LabClient() {
     setNote(''); setSaveOpen(false); setBeforeLoad(null);
   };
   const resetAll = () => { setParams(strategy.defaults); setBeforeLoad(null); };
+  /** A configuration from an optimiser study, into the Lab: its strategy, settings and (real data) period. Only ever
+   *  called by the person pressing "Load into the Lab" or "Run a backtest" there. */
+  const loadStudyConfig = (cfg: StudyConfig, id: number, andRun: boolean) => {
+    const s = labStrategy(cfg.slug);
+    if (!s) return;
+    setBeforeLoad(s.slug === slug ? params : null);
+    if (s.slug !== slug) { setSlug(s.slug); if (s.family === 'builder') lastBuilder.current = s.slug; }
+    setParams({ ...configParams(cfg, id), strategy: s.slug });
+    if (cfg.real) { pickSource('real'); setFlag(cfg.series); if (cfg.data.from && cfg.data.to) setRequest({ from: cfg.data.from, to: cfg.data.to }); }
+    else pickSource('synthetic');
+    setView('results');
+    pendingRun.current = andRun;
+  };
   /** Only ever called by the person pressing "Load" in the optimisation lab. */
   const loadFromStudy = (changes: Record<string, unknown>) => { setBeforeLoad(params); setParams((p) => ({ ...p, ...(changes as Params) })); };
   const pickSource = (s: Source) => { setSource(s); try { localStorage.setItem(SOURCE_KEY, s); } catch { /* ignore */ } };
@@ -424,8 +472,16 @@ export function LabClient() {
 
   const runButton = (cls = '') => (
     <button ref={cls ? undefined : runBtn} type="button" className={`run-btn ${cls}`} disabled={!canRun || busy} onClick={() => { runNow(); setDrawer(false); if (guide === GUIDE.length - 1) setGuide(null); }}
-      aria-keyshortcuts={mac ? 'Meta+Enter' : 'Control+Enter'}>
+      aria-keyshortcuts={mac ? 'Meta+Enter' : 'Control+Enter'} title={`Run the backtest (${mac ? '⌘' : 'Ctrl'} + Enter)`}>
       <Icon.play /><span>{runLabel}</span>{!cls && <kbd>{mac ? '⌘' : 'Ctrl'} ↵</kbd>}
+    </button>
+  );
+
+  const optButton = (cls = '') => (
+    <button type="button" className={`opt-btn ${cls}`} aria-label="Optimise" aria-pressed={view === 'optimise'} disabled={!booted || !strategy.optimise.ok}
+      title={strategy.optimise.ok ? 'Search ranges of these settings, with validation' : strategy.optimise.why}
+      onClick={() => { setView((v) => (v === 'optimise' ? 'results' : 'optimise')); setDrawer(false); }}>
+      <Icon.sliders /><span>Optimise</span>
     </button>
   );
 
@@ -438,7 +494,7 @@ export function LabClient() {
           <Icon.panel />
         </button>
         <Logo />
-        <div className="ws-crumb"><b>Lab</b><span>{strategy.short} · {real ? `real NIFTY ${seriesName}` : 'synthetic model'}</span></div>
+        <div className="ws-crumb"><b>{view === 'optimise' ? 'Lab · Optimise' : 'Lab'}</b><span>{strategy.short} · {real ? `real NIFTY ${seriesName}` : 'synthetic model'}</span></div>
         <nav className="ws-nav" aria-label="Main">
           <Link href="/#strategies">Strategies</Link>
           <Link href="/lab" aria-current="page">Lab</Link>
@@ -616,7 +672,10 @@ export function LabClient() {
           <div className="rail-checks" aria-live="polite">
             {checks.map((c, i) => <div key={i} className="rail-check" data-ok={c.ok}><i aria-hidden="true" /><span>{c.t}</span></div>)}
           </div>
-          {runButton()}
+          <div className="run-row">
+            {runButton()}
+            {optButton()}
+          </div>
           <div className="rail-auto">
             <label><input type="checkbox" checked={autoOn} onChange={(e) => setAuto(e.target.checked)} />Re-run on every change</label>
             <span>{nChanged ? `${nChanged} changed` : 'defaults'}</span>
@@ -635,7 +694,11 @@ export function LabClient() {
               rolling={{ on: roll.on, setOn: (v) => setRoll({ on: v }), w: roll.w, setW: (n) => setRoll({ w: n }), s: roll.s, setS: (n) => setRoll({ s: n }), plan }} />
           )}
 
-          {lab.status === 'error' ? (
+          {view === 'optimise' ? (
+            <OptimiseView strategy={strategy} params={params} real={real} series={flag} data={studyData} dates={real && range ? range.runnable : null}
+              slip={slip} brokerage={Number(params.brokerage_per_order ?? 20)} msPerRun={r && !stale && meta?.dataKey === dataKey ? lab.ms : null}
+              opt={opt} onLoad={loadStudyConfig} onClose={() => setView('results')} />
+          ) : lab.status === 'error' ? (
             <div className="ws-empty" role="alert">
               <span className="lbl">Run stopped</span>
               <h2>The simulation stopped</h2>
@@ -714,6 +777,7 @@ export function LabClient() {
 
       <div className="ws-mbar">
         <button type="button" className="qbtn" onClick={() => setDrawer(true)} aria-controls="lab-rail" aria-expanded={drawer}><Icon.sliders /> Settings{nChanged ? ` · ${nChanged}` : ''}</button>
+        {optButton('opt-btn--bar')}
         {runButton('run-btn--bar')}
       </div>
     </div>

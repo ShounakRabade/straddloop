@@ -377,6 +377,88 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
     }
   });
 
+  await step('optimiser: the four-leg model cannot be searched, and the button says why', async () => {
+    const { ctx, page } = await ctxFor(1366, 768);
+    await page.goto(`${BASE}/lab?s=fourleg`);
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    const b = page.locator('.rail-foot .opt-btn');
+    assert(await b.isDisabled(), 'Optimise is disabled for the four-leg model');
+    assert(/synthetic stock model/.test(await b.getAttribute('title')), 'the reason is on the button');
+    await ctx.close();
+  });
+  {
+    const { ctx, page } = await ctxFor(1366, 768);
+    const lead = () => page.locator('.exec .m--lead .m-v').innerText();
+    await step('optimiser: the estimate comes first; a study gives three labelled answers and a table without the held-out test', async () => {
+      await page.goto(`${BASE}/lab?s=straddle`);
+      await page.locator('.exec').waitFor({ timeout: 30000 });
+      await page.locator('.rail-foot .opt-btn').click();
+      await page.locator('.opt-axes').waitFor();
+      await page.locator('.opt-setup .figs .m', { hasText: /will try/i }).waitFor({ timeout: 10000 });
+      const est = await page.locator('.opt-setup .figs').innerText();
+      assert(/grid\s+35\b/i.test(est) && /will try\s+36\b/i.test(est) && /can run\s+36\b/i.test(est), est);
+      const l = await layout(page);
+      assert(l.sideways <= 1, `optimiser setup scrolls sideways by ${l.sideways}px`);
+      await page.screenshot({ path: path.join(SHOTS, 'opt-setup.png') });
+      await page.locator('button', { hasText: 'Start the study' }).click();
+      await page.locator('.opt-answers').waitFor({ timeout: 90000 });
+      const labels = await page.locator('.opt-card .opt-card-h .lbl').allInnerTexts();
+      assert.deepStrictEqual(labels.map((t) => t.toLowerCase()), ['in-sample leader', 'best out-of-sample', 'most robust']);
+      assert(/not evidence/i.test(await page.locator('.opt-card').first().innerText()), 'the leader is labelled as not evidence');
+      assert.strictEqual(await page.locator('.opt-tbl tbody tr').count(), 36, 'every configuration is in the table');
+      assert(!/test/i.test(await page.locator('.opt-tbl thead').innerText()), 'no held-out test column in the table');
+      // the file the page would save, read inside the page (a real download leaves Playwright crashing on close)
+      await page.evaluate(() => { const orig = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { if (this.download) { window.__csv = fetch(this.href).then((r) => r.text()); return; } return orig.call(this); }; });
+      await page.locator('button', { hasText: 'Export CSV' }).click();
+      const head = (await page.evaluate(() => window.__csv)).split('\n')[0];
+      assert(head.startsWith('rank_by_training,config,sl_pct,target_per_lot') && !/test|full/.test(head), head);
+      const l2 = await layout(page);
+      assert(l2.sideways <= 1, `study results scroll sideways by ${l2.sideways}px`);
+      await page.screenshot({ path: path.join(SHOTS, 'opt-results.png'), fullPage: true });
+    });
+    await step('optimiser: "Run a backtest" on an answer loads it into the Lab and reproduces the figure the study measured', async () => {
+      const card = page.locator('.opt-card').first();
+      const want = (await card.innerText()).match(/held-out test included: net (\S+)/)[1];
+      await card.locator('button', { hasText: 'Run a backtest' }).click();
+      await page.locator('.exec').waitFor({ timeout: 30000 });
+      await page.waitForFunction(() => !document.querySelector('.stale') && document.querySelector('.ws-status')?.getAttribute('data-state') === 'done', null, { timeout: 30000 });
+      assert.strictEqual((await lead()).trim(), want);
+      assert(/Loaded from the optimisation lab/.test(await page.locator('.rail-note').innerText()), 'the rail says where the settings came from');
+    });
+    await step('optimiser: a cancelled study keeps what it measured, is saved, and resumes to the end', async () => {
+      await page.locator('.rail-foot .opt-btn').click();
+      await page.locator('button', { hasText: 'Set up another study' }).click();
+      await page.locator('.opt-axes tbody tr', { hasText: 'Entry' }).first().locator('input[type=checkbox]').check();
+      await page.locator('.opt-setup .figs .m', { hasText: /will try\s*176/i }).waitFor({ timeout: 10000 });
+      await page.locator('button', { hasText: 'Start the study' }).click();
+      await page.locator('.opt-rate', { hasText: /a second/ }).waitFor({ timeout: 60000 });
+      await page.locator('button', { hasText: 'Cancel, keep what is measured' }).click();
+      await page.locator('.ws-empty', { hasText: 'Cancelled' }).waitFor({ timeout: 30000 });
+      const n = Number((await page.locator('.ws-empty').innerText()).match(/(\d+) of 176 configurations were measured/)[1]);
+      assert(n >= 10 && n < 176, `measured ${n} before the cancel`);
+      await page.locator('.opt-tabs button', { hasText: 'Saved' }).click();
+      await page.locator('#opt-saved-h').waitFor();
+      const saved = await page.locator('#opt-saved-h').locator('xpath=../..').innerText();
+      assert(/Cancelled/.test(saved) && /Finished/.test(saved), saved);
+      await page.locator('#opt-saved-h').locator('xpath=../..').locator('button', { hasText: 'Resume' }).click();
+      await page.locator('.opt-answers').waitFor({ timeout: 90000 });
+      assert.strictEqual(await page.locator('.opt-tbl tbody tr').count(), 50, 'the first 50 of 176 rows are shown');
+      assert(/176 of 176/.test(await page.locator('.opt-tools').innerText()), 'all 176 configurations are in the table');
+    });
+    await ctx.close();
+  }
+  await step('optimiser on a phone: opened from the bottom bar, nothing scrolls sideways', async () => {
+    const { ctx, page } = await ctxFor(390, 844);
+    await page.goto(`${BASE}/lab?s=short_strangle`);
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    await page.locator('.ws-mbar .opt-btn').click();
+    await page.locator('.opt-axes').waitFor();
+    await page.waitForTimeout(400);
+    const l = await layout(page);
+    assert(l.sideways <= 1, `sideways ${l.sideways}px`);
+    await page.screenshot({ path: path.join(SHOTS, 'opt-phone.png'), fullPage: true });
+    await ctx.close();
+  });
   await step('loading state: progress is shown while day files download', async () => {
     const { ctx, page } = await ctxFor(1366, 768);
     await ctx.route('https://stubproject.supabase.co/storage/**', async (route) => { await new Promise((r) => setTimeout(r, 1500)); await route.fallback(); });

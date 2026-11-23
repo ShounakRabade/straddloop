@@ -883,8 +883,6 @@
     };
   }
 
-  /** Robustness check of ONE configuration (no search): consistency across chronological thirds,
-   *  one-step sensitivity on the given axes, cost stress and Monte Carlo. */
   // ================================================================== rolling windows
   /**
    * The same rules over successive windows of history (the Lab's rolling-window mode). spec: { params, windows:
@@ -918,6 +916,8 @@
     return { rows, summary };
   }
 
+  /** Robustness check of ONE configuration (no search): consistency across chronological thirds,
+   *  one-step sensitivity on the given axes, cost stress and Monte Carlo. */
   async function runCheck(spec, runner, hooks) {
     hooks = Object.assign({ progress: () => {}, cancelled: () => false, yieldFn: () => Promise.resolve(), now: () => Date.now() }, hooks || {});
     const t0 = hooks.now();

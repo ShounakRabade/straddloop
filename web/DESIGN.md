@@ -78,7 +78,7 @@ full-width results area. Source: `app/lab/lab.css`, components in `components/la
   under sub-headings (`SUBGROUP` in `lib/labSections.ts`). Each section header
   states what is set inside it and badges what changed, what must be fixed and what needs a check. The
   footer holds the readiness checks and the Run button, always visible. Desktop collapses it to a 52px
-  spine; below 1024px it is a drawer with a scrim and a fixed bottom bar (Settings, Run).
+  spine; below 1024px it is a drawer with a scrim and a fixed bottom bar (Settings, Optimise, Run).
 - **Fields stay short.** A field shows its default and a reset only once it differs from the default (the
   marker highlight says it changed); four or more choices, or long labels, are a dropdown, not a column of
   radio rows. With every section open the rail is under 3,700px (checked by the e2e test).
@@ -98,6 +98,15 @@ full-width results area. Source: `app/lab/lab.css`, components in `components/la
   the table, with the leg marked and Run blocked.
 - **Data status** (`DataStatus`): one line above the results (REAL DATA or SYNTHETIC, the series and
   dates, the one caveat that always applies) with the assumptions behind every figure opening below it.
+- **Optimiser** (`components/optimise/`): the Optimise button sits beside Run (an outlined ink button; pressed
+  while its view is open) and opens a view in the results area, so the rail and the range bar keep working.
+  The setup reads top to bottom: what to search (a table with from / to / step per setting), how to judge,
+  validation, limits, then **Before it runs** (the estimate) and Start. While a study runs, one boxed progress
+  block (determinate bar, count, and a rate only once measured; the indeterminate sheen stops under reduced
+  motion). Results: three answer columns ruled like the executive strip, each tagged (leader red *not
+  evidence*, out-of-sample cobalt, robust green) with its held-out test in a tinted column; then the checks as
+  figures, the compare table and the ranked table. Curves shade training, validation and held-out test as
+  bands; comparison lines differ by dash as well as colour.
 - **Figures.** Mono, tabular. Green and red are for P&L only; a zero is never red. A figure the engine did
   not produce is an em dash with the reason beside it, never an estimate. Estimated figures carry an
   `EST.` tag.

@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased: the optimiser
+
+* **Optimise**, beside Run: searches ranges of a strategy's settings on the data the Lab has chosen (real or
+  synthetic) and gives three answers instead of one: the **in-sample leader** (best on the training window,
+  labelled *not evidence*), the **best out-of-sample** (best on validation among the top K by training) and the
+  **most robust** (highest robustness score among the top K by in-sample score). Each answer shows its held-out
+  test, which chose nothing. Nothing is ever called optimal. The four-leg model stays excluded, with the reason
+  on the button.
+* **What can be searched** comes from each strategy: times (on the field's grain and bounds), stops and targets
+  (in the unit set in the Lab), strikes, re-entry and entry rules; for builder structures, the call side and the
+  put side separately (each wing keeps its width), per-leg and position levels, trades per session and lots.
+  Configurations the rules or the stored strikes cannot run (times out of order, a leg beyond ATM ± 10) are
+  refused before running and counted by reason. Charges and slippage are never searched.
+* **Before it runs**: grid size, how many will be tried (the whole grid, or a seeded random sample when it is
+  over the limit; at most 20,000), how many can run, the robustness runs, memory per worker and a time bound
+  from the last backtest. During the run: stage, count, and a rate and time left only once 10 configurations
+  have finished.
+* **Against overfitting**: chronological training / validation / held-out test split (default 60 / 20 / 20);
+  walk-forward with re-selection, PBO, thirds and volatility regimes, all inside training + validation; a
+  minimum of traded days to be eligible; deflated Sharpe; training vs validation rank correlation; finalists
+  re-run one step either side on each ordered setting and at doubled slippage. Every run pays the Lab's charges
+  and slippage; zero slippage on real data needs an explicit override.
+* **Results**: the ranked table (every searched setting, net, return, win rate, traded days, average per
+  traded day, max drawdown, profit factor, Sharpe, net ÷ drawdown, longest win and loss runs, robustness) on
+  in-sample, training or validation figures, sortable and filterable; compare up to four; a configuration's
+  cumulative curve with the windows shaded; Load into the Lab, or Run a backtest; CSV. The held-out test is in
+  neither the table nor the CSV, so nothing can be chosen on it.
+* **Engine**: a dedicated optimiser worker (`public/engine/optimise_worker.js`), so backtests stay usable during
+  a study; a pool of 1–4 workers sized by memory (about 1.7 MB a session each). Each configuration is measured
+  once on windows fixed beforehand and only those measurements are kept (`public/engine/study.js`), never its
+  day records. Studies are written to IndexedDB batch by batch, can be cancelled, resumed and reopened, and the
+  same study gives the same answers.
+* Checked: on real data (short strangle, 1 Apr–30 Jul 2026, 65 configurations) a backtest of each answer
+  reproduces the study's figure exactly (+₹9,393, +₹9,393, −₹2,544); scrambling every held-out test result
+  changes no answer; PBO from the per-block sums equals the existing implementation.
+
 ## Unreleased: moving through history
 
 * **Range bar** above the results on real data: the selected window (dates, calendar days, sessions), Previous

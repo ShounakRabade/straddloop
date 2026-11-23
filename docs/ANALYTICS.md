@@ -103,6 +103,11 @@ No model output is used to claim a profit. A model that does not beat its baseli
 
 ## 3. Optimisation lab (Part 7)
 
+This section describes the Research tab's study of the latest run (`analytics.runOptimisation`). The Lab's
+**Optimise** view runs larger studies in their own workers, on any strategy except the four-leg model, with
+three answers (in-sample leader, best out-of-sample, most robust) and a robustness score; it reuses the
+objectives, split, walk-forward, PBO and deflated Sharpe below. See ENGINE_INTERFACES.md section 8.
+
 **Search space.** `PARAM_SPACE` lists what can be searched per strategy: Lab settings (stop, target,
 re-entry, entry filter, strike) and engine settings without a Lab field (exit time, re-entry cutoff, daily
 loss cap, skip expiry day, opening-range width filter; for the ORB: latest entry, exit time, max hold).

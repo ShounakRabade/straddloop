@@ -458,3 +458,67 @@ file quality is `complete`). No new database objects are needed; `market_day_sta
 | Greeks / delta strikes | no on real data; yes on the synthetic model (its vol is known) |
 | Other underlyings | no stored data |
 | Multi-day holds and expiry settlement | real data yes (contracts continue across stored days); synthetic no. Expiry dates in today's day files are assumed (weekday rule): a holiday-shifted expiry (for example around Diwali) would be settled on the wrong day until bhavcopy expiries are imported, so such runs carry `EXPIRY_ASSUMED` |
+
+## 8. Optimisation studies (`public/engine/study.js`, `web/lib/optimiser/`)
+
+A study measures many configurations of one Lab strategy on one set of sessions and chooses from the in-sample
+part alone. The Research tab's `analytics.runOptimisation` (section-by-section analysis of the latest run) is
+unchanged; studies are the Lab's **Optimise** view.
+
+```
+sessions  [0 ........................ isEnd) [isEnd ...... n)
+           training [0, a)  validation [a, isEnd)   held-out test
+```
+
+**Windows** (`study.studyPlan(dates, { split, folds, wfMode, blocks })`, fixed before any configuration runs):
+`split` by `analytics.splitChrono`; walk-forward folds inside `[0, isEnd)` (the first half trains, the rest is
+cut into `folds` test blocks; rolling = the same training length, anchored = from session 0); PBO blocks (an even
+number, 4–8) and thirds of `[0, isEnd)`. `volRegimes(sessions, isEnd)` labels each session low / mid / high by its
+index range, cut at the in-sample terciles.
+
+**Measuring** (`summarise(days, plan, regimes, { capital })`): one configuration's day records
+(`analytics.fromRun(compute.evaluate(params, sessions)).days`) become `perf` figures for the full period,
+training, validation, in-sample, held-out test, each fold's training and test window, the thirds and the regimes,
+plus per-block sums (s, s², count) for PBO and walk-forward pooling, and longest win / loss runs. The day records
+are not kept.
+
+**Choosing** (`selectStudy(cands, plan, { objective, weights, minTrades, topK })`), never reading `test`:
+
+| Answer | Rule |
+| --- | --- |
+| In-sample leader | best training score (not evidence) |
+| Best out-of-sample | best validation score among the top K by training |
+| Most robust | `mostRobust` over the top K by in-sample score, scored by `robustScore` |
+
+Ties go to the lower configuration number, so the same measurements in any order give the same answers. Also
+returned: `walk_forward` (re-selection per fold, out-of-sample pooled exactly from the block sums, efficiency,
+distinct choices), `pbo` (combinatorially symmetric cross-validation on the blocks, combinations built without
+recursion), `dsr` (deflated Sharpe of the leader and the best out-of-sample), `rank_corr_train_val`,
+`min_trades`, `selection_rule`. `robustScore(summary, neighbours, stressed)` is the plain mean of the shares that
+could be measured: walk-forward test blocks, thirds and regimes that made money, validation made money,
+neighbours (one step either side on each ordered setting) that made money in-sample, and in-sample net kept at
+doubled slippage.
+
+**Space** (`lib/optimiser/space.ts`): `axesFor(strategy, params)` lists searchable settings with bounds and grain;
+`rangeValues` turns from / to / step into values; `valuesAt` / `indexOf` / `positionsAt` enumerate the grid by index
+(mixed radix); `plannedIndices` is the whole grid or a seeded sample (`HARD_CAP` 20,000); `paramsFor` writes a
+configuration into Lab parameters (builder call / put offsets move every ATM-placed leg of that side);
+`refusal` applies the time bounds and order and `legs.validate` with the data's caps; `estimate` counts all of it
+before anything runs. Configuration 0 is the Lab's own settings; configuration n is grid point n − 1.
+
+**Running** (`lib/optimiser/controller.ts` `runStudy(cfg, { pool, store, init, onProgress, signal })`): refusals are
+recorded, the rest are measured in batches on the pool, each batch written to the store; then the answers, then the
+finalists' neighbours and doubled-slippage runs (`stressSlip(s) = max(2s, s + 0.5)`), then the robust answer.
+A cancel stops before the next configuration; a resumed study measures only what is missing and must see the same
+number of sessions. The pool is `WorkerPool` (browser, `public/engine/optimise_worker.js`) or any object with the
+same `init / evaluate / detail / cancel` (Node tests use an in-process pool).
+
+Optimiser worker messages: `{ id, init: { days | synthetic, lotSize, plan, capital, reuse? } } → { plan, n }`;
+`{ id, evaluate: [{ idx, params }] } → { id, item }` per configuration, then `{ id, ok, done }`;
+`{ id, detail: { params } } → { days: [{ date, net, traded, status }] }`; `{ cancel: true }`.
+
+**Store** (`lib/optimiser/store.ts`): IndexedDB `straddloop-optimiser`, stores `studies` (by id) and `cands` (by
+[study, key]; key `g<n>` a configuration, `s<n>` the same at doubled slippage). Studies stay in the browser.
+
+**Table and CSV** (`lib/optimiser/rows.ts`): training, validation and in-sample figures only; the held-out test and
+the full period (which contains it) are left out.
