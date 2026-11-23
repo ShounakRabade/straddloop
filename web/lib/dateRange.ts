@@ -8,7 +8,7 @@
 
 export type Series = 'WEEK' | 'MONTH';
 export type DayState = 'validated' | 'partial' | 'failed' | 'downloading' | 'missing' | 'holiday' | 'weekend';
-export type Preset = 'last_7' | 'last_30' | 'last_90' | '6m' | '1y' | '2y' | '3y' | 'max';
+export type Preset = 'last_7' | 'last_30' | 'last_60' | 'last_90' | '6m' | '1y' | '2y' | '3y' | 'max';
 
 /** One stored day file (a row of public.market_days, or a file picked from this computer). */
 export interface InventoryDay {
@@ -48,8 +48,10 @@ export interface DateRange {
   key: string;
 }
 
-/** Fallback only when no dated inventory exists; real ranges use the series' earliest stored day. */
+/** Fallback only when no dated inventory exists; real ranges start on the series' earliest stored day. */
 export const FLOOR = '2023-01-01';
+/** The earliest day the Lab can cost (the dated charge table starts on 1 Jul 2020), so the earliest it asks to load. */
+export const LOAD_FLOOR = '2020-07-01';
 
 // NSE equity-derivatives trading holidays on weekdays, 2023–2025, from memory of NSE circulars.
 // NOT verified against the official list: used only to label a weekday with NO stored file as a likely
@@ -140,7 +142,12 @@ export function buildDateRange(request: { from: string; to: string }, inventory:
     note(bounds.latest_any ? `The latest stored day is ${bounds.latest_any}; the end was moved there.` : `The end date is after today (${today}); it was moved to today.`);
     hi = ceiling;
   }
-  if (lo > hi) { err(bounds.latest_any ? `Nothing is stored after ${bounds.latest_any}. Pick dates up to that day, or load newer data.` : 'There is no data for these dates.'); return finish(); }
+  if (lo > hi) {
+    // say which side of the stored history the request fell on
+    if (bounds.earliest && to < bounds.earliest) err(`Stored history starts on ${bounds.earliest}; nothing is stored before it. Pick dates from then on, or load older data.`);
+    else err(bounds.latest_any ? `Nothing is stored after ${bounds.latest_any}. Pick dates up to that day, or load newer data.` : 'There is no data for these dates.');
+    return finish();
+  }
   out.effective = { from: lo, to: hi };
 
   const files = new Map(inventory.map((d) => [d.trade_date, d]));
@@ -198,6 +205,7 @@ export function presetRange(preset: Preset, inventory: InventoryDay[], statuses:
   switch (preset) {
     case 'last_7': return { from: back(7), to: end };
     case 'last_30': return { from: back(30), to: end };
+    case 'last_60': return { from: back(60), to: end };
     case 'last_90': return { from: back(90), to: end };
     case '6m': return { from: months(6), to: end };
     case '1y': return { from: months(12), to: end };
@@ -212,6 +220,81 @@ export function loadCommand(r: DateRange): string | null {
   if (r.dataset.source !== 'dhan' || !isIsoDate(r.request.from) || !isIsoDate(r.request.to) || r.request.from > r.request.to) return null;
   const beyond = (r.bounds.latest_any != null && r.request.to > r.bounds.latest_any) || (r.bounds.earliest != null && r.request.from < r.bounds.earliest) || !r.bounds.latest_any;
   if (!(r.counts.missing || r.counts.failed || beyond)) return null;
-  const start = r.request.from < r.bounds.floor ? r.bounds.floor : r.request.from;
+  // the request as asked (older days are exactly what may need loading), no earlier than the charge table
+  const start = r.request.from < LOAD_FLOOR ? LOAD_FLOOR : r.request.from;
+  if (start > r.request.to) return null;
   return `straddloop load --expiry ${r.dataset.series} --start ${start} --end ${r.request.to}`;
+}
+
+// ------------------------------------------------------------------ moving through history
+// Windows are calendar days, both ends included, on UTC dates (so month lengths and leap days are exact and no
+// clock change can shift a day). Moves never invent data: a window that runs past the stored history is cut to
+// it, and the cut is reported so the page can say so.
+
+export interface Span { from: string; to: string }
+
+/** Whole days from a to b (b later = positive). */
+export const daysBetween = (a: string, b: string) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86400000);
+/** Calendar days in a range, both ends included: 1 Apr–30 Jul 2026 is 121. */
+export const windowLength = (r: Span) => daysBetween(r.from, r.to) + 1;
+/** A window of `len` days starting on `from`. */
+export const windowFrom = (from: string, len: number): Span => ({ from, to: addDays(from, len - 1) });
+/** The range moved n days later (earlier when negative), `len` days long (default: its own length). */
+export const shiftRange = (r: Span, n: number, len = windowLength(r)): Span => windowFrom(addDays(r.from, n), len);
+/** The window right after this one, `len` days long: 1 Apr–30 Jul 2026 → 31 Jul–28 Nov 2026. */
+export const nextWindow = (r: Span, len = windowLength(r)): Span => windowFrom(addDays(r.to, 1), len);
+/** The window right before this one, `len` days long: 1 Apr–30 Jul 2026 → 1 Dec 2025–31 Mar 2026. */
+export const prevWindow = (r: Span, len = windowLength(r)): Span => ({ from: addDays(r.from, -len), to: addDays(r.from, -1) });
+
+export interface Fitted {
+  /** The window inside the stored history, or null when none of it is stored. */
+  range: Span | null;
+  /** Which end was cut to the stored history, if any. */
+  cut: 'start' | 'end' | 'both' | null;
+  /** Days kept of the days asked for. */
+  kept: number; asked: number;
+  /** Why nothing is left: the whole window is before the first or after the last stored day. */
+  outside: 'before' | 'after' | null;
+}
+/** A target window fitted to the stored history [earliest, latest]: cut at either end, never moved. */
+export function fitWindow(target: Span, bounds: { earliest: string | null; latest_any: string | null }): Fitted {
+  const asked = windowLength(target), e = bounds.earliest, l = bounds.latest_any;
+  if (!e || !l) return { range: null, cut: null, kept: 0, asked, outside: 'after' };
+  if (target.from > l) return { range: null, cut: null, kept: 0, asked, outside: 'after' };
+  if (target.to < e) return { range: null, cut: null, kept: 0, asked, outside: 'before' };
+  const from = target.from < e ? e : target.from, to = target.to > l ? l : target.to;
+  const cs = from !== target.from, ce = to !== target.to;
+  return { range: { from, to }, cut: cs && ce ? 'both' : cs ? 'start' : ce ? 'end' : null, kept: windowLength({ from, to }), asked, outside: null };
+}
+
+/** The last N stored sessions, or the last N calendar days, ending on the latest stored day. */
+export function lastN(n: number, unit: 'sessions' | 'days', inventory: InventoryDay[], statuses: StatusRow[] = []): Span | null {
+  const b = boundsOf(inventory, statuses);
+  if (!b.latest_any || !b.earliest || !(n >= 1)) return null;
+  const end = b.latest_any;
+  if (unit === 'days') { const from = addDays(end, -(Math.round(n) - 1)); return { from: from < b.earliest ? b.earliest : from, to: end }; }
+  const usable = inventory.filter((d) => d.quality !== 'empty' && d.trade_date >= b.floor && d.trade_date <= end).map((d) => d.trade_date).sort();
+  return { from: usable[Math.max(0, usable.length - Math.round(n))], to: end };
+}
+
+/** More windows than this are not run in one go (each is a full backtest). */
+export const MAX_WINDOWS = 400;
+/**
+ * Rolling windows through a span: `windowDays` calendar days each, a new one every `stepDays`, whole windows only.
+ * `leftover` = days at the end of the span that no window reaches (shorter than a step); `capped` = more would fit.
+ */
+export function rollingWindows(span: Span, windowDays: number, stepDays: number): { windows: Span[]; leftover: number; capped: boolean } {
+  const W = Math.round(windowDays), S = Math.round(stepDays);
+  if (!(W >= 1 && S >= 1) || !isIsoDate(span.from) || !isIsoDate(span.to) || span.from > span.to) return { windows: [], leftover: 0, capped: false };
+  const windows: Span[] = [];
+  let from = span.from, capped = false;
+  for (;;) {
+    const w = windowFrom(from, W);
+    if (w.to > span.to) break;
+    if (windows.length >= MAX_WINDOWS) { capped = true; break; }
+    windows.push(w);
+    from = addDays(from, S);
+  }
+  const last = windows[windows.length - 1];
+  return { windows, leftover: last ? daysBetween(last.to, span.to) : windowLength(span), capped };
 }

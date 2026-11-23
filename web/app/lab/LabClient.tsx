@@ -13,7 +13,7 @@ import { useSession } from '@/lib/useSession';
 import { cloudEnabled } from '@/lib/supabase';
 import { saveRun } from '@/lib/store';
 import { availability, download, readLocal, statuses, type Availability, type ExpiryFlag } from '@/lib/marketData';
-import { boundsOf, buildDateRange, presetRange, type InventoryDay, type StatusRow } from '@/lib/dateRange';
+import { boundsOf, buildDateRange, presetRange, rollingWindows, type InventoryDay, type StatusRow } from '@/lib/dateRange';
 import { ENGINE_ONLY_KEYS, PARAM_SPACE, choiceLabel } from '@/lib/researchSpace';
 import { SECTIONS, SUBGROUP, sectionOf, type SectionId } from '@/lib/labSections';
 import { ROLE_LABEL, sequenceProblems, timeProblem, toMin, type TimeRole } from '@/lib/sessionTime';
@@ -27,6 +27,8 @@ import { Icon, ParamField, Section, Tip, fmtVal } from '@/components/lab/kit';
 import { RoleMark, SessionLine, useTimeInterval } from '@/components/lab/TimeField';
 import { LegTable } from '@/components/lab/LegTable';
 import { DataStatus } from '@/components/lab/DataStatus';
+import { RangeBar } from '@/components/lab/RangeBar';
+import { RollingView, type RollingState } from '@/components/lab/RollingView';
 import { Calendar } from '@/components/lab/Calendar';
 import { ResearchPanel } from '@/components/research/ResearchPanel';
 import { Exec, ResultTabs, headline, type Baseline, type TabId } from '@/components/lab/Results';
@@ -35,7 +37,8 @@ const OPEN_KEY = 'straddloop.open';
 const SOURCE_KEY = 'straddloop.source';
 const RAIL_KEY = 'straddloop.rail';
 const AUTO_KEY = 'straddloop.autorun';
-const TAB_IDS: TabId[] = ['overview', 'capital', 'charts', 'trades', 'sessions', 'replay', 'research', 'diagnostics', 'ledger'];
+const ROLL_KEY = 'straddloop.rolling';
+const TAB_IDS: TabId[] = ['overview', 'capital', 'charts', 'trades', 'sessions', 'rolling', 'replay', 'research', 'diagnostics', 'ledger'];
 const NO_STATUS: StatusRow[] = [];
 const ROLE_ORDER: TimeRole[] = ['entry', 'last_entry', 'exit'];
 type Source = 'synthetic' | 'real';
@@ -269,6 +272,34 @@ export function LabClient() {
   const busy = lab.status === 'running' || !!loading;
   const cmp = r && baseline && meta && baseline.strategy === slug && baseline.dataKey === meta.dataKey && baseline.key !== meta.key ? baseline : null;
   const outcomes = useMemo(() => (r && !stale && r.days ? new Map(r.days.map((d) => [d.date, d])) : undefined), [r, stale]);
+
+  // ---------- rolling windows: the same rules over successive windows of the selected period (real data)
+  const [roll, setRollState] = useState({ on: false, w: 120, s: 30 });
+  useEffect(() => { try { const v = JSON.parse(localStorage.getItem(ROLL_KEY) ?? 'null'); if (v && typeof v.on === 'boolean') setRollState({ on: v.on, w: Number(v.w) || 120, s: Number(v.s) || 30 }); } catch { /* storage blocked */ } }, []);
+  const setRoll = (patch: Partial<typeof roll>) => setRollState((x) => { const n = { ...x, ...patch }; try { localStorage.setItem(ROLL_KEY, JSON.stringify(n)); } catch { /* ignore */ } return n; });
+  const plan = useMemo(() => (real && range?.effective && roll.w >= 5 && roll.s >= 1 ? rollingWindows(range.effective, roll.w, roll.s) : null), [real, range, roll.w, roll.s]);
+  const rollKey = JSON.stringify([configKey, roll.w, roll.s]);
+  const [rollRun, setRollRun] = useState<{ key: string; state: RollingState } | null>(null);
+  const rollCancel = useRef<(() => void) | null>(null);
+  // start once the whole-period run on screen is current; each set of settings runs once (a result is kept per key)
+  useEffect(() => {
+    if (!roll.on || !real || !r || stale || lab.status !== 'done' || !plan?.windows.length || !range || rollRun?.key === rollKey) return;
+    const key = rollKey, total = plan.windows.length, w = roll.w, st = roll.s;
+    const job = lab.rolling({ params: runParams, days: range.files.map((f) => ({ path: f.path })), windows: plan.windows },
+      (p) => setRollRun((x) => (x && x.key === key ? { key, state: { status: 'running', done: p.done, total: p.total, label: p.label } } : x)));
+    rollCancel.current = job.cancel;
+    setRollRun({ key, state: { status: 'running', done: 0, total } });
+    job.done.then((res) => setRollRun((x) => (x && x.key === key
+      ? { key, state: res.ok ? { status: 'done', result: res.rolling, stale: false, w, s: st } : { status: 'error', error: res.error === 'cancelled' ? 'cancelled before the last window' : res.error } } : x)));
+  }, [roll.on, roll.w, roll.s, real, r, stale, lab, plan, range, rollRun?.key, rollKey, runParams]);
+  // settings changed while windows were running: stop them (their answer would be for the old settings)
+  useEffect(() => {
+    if (rollRun && rollRun.key !== rollKey && rollRun.state.status === 'running') { rollCancel.current?.(); setRollRun(null); }
+  }, [rollKey, rollRun]);
+  const rollingState: RollingState = !roll.on || !real ? { status: 'off' }
+    : !plan || !plan.windows.length ? { status: 'empty', why: roll.w >= 5 && roll.s >= 1 ? `The selected period is shorter than one ${roll.w}-day window. Pick a longer period or a shorter window.` : 'Set a window of at least 5 days and a step of at least 1 day.' }
+      : rollRun?.key === rollKey ? rollRun.state
+        : rollRun && rollRun.state.status === 'done' ? { ...rollRun.state, stale: true } : { status: 'waiting' };
 
   const setTab = useCallback((t: TabId) => { setTabState(t); try { history.replaceState(null, '', `#${t}`); } catch { /* ignore */ } }, []);
   const toggleSec = (id: SectionId) => setOpen((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
@@ -599,6 +630,10 @@ export function LabClient() {
           <DataStatus real={real} local={local ? local.length : null} r={r} slip={slip} brokerage={Number(params.brokerage_per_order ?? 20)} seriesName={seriesName} family={strategy.family}
             syn={{ days: Number(params.days), seed: Number(params.seed), iv: Number(params.iv), months: Number(params.months), fourleg: isFourleg }}
             onSwitch={real ? (strategy.syntheticOk ? { label: 'Use synthetic', go: () => pickSource('synthetic') } : null) : realOk ? { label: 'Use real NIFTY data', go: () => { pickSource('real'); showSec('data'); } } : null} />
+          {real && inventory.length > 0 && (
+            <RangeBar request={request} setRequest={setRequest} range={range} inventory={inventory} statuses={statusRows}
+              rolling={{ on: roll.on, setOn: (v) => setRoll({ on: v }), w: roll.w, setW: (n) => setRoll({ w: n }), s: roll.s, setS: (n) => setRoll({ s: n }), plan }} />
+          )}
 
           {lab.status === 'error' ? (
             <div className="ws-empty" role="alert">
@@ -668,7 +703,9 @@ export function LabClient() {
               )}
               <Exec r={r} busy={busy || stale} baseline={cmp} />
               <ResultTabs r={r} lab={lab} range={range} real={real} slip={Number(params.slip_pct ?? NaN)} tab={tab} setTab={setTab}
-                research={<ResearchPanel r={r} lab={lab} params={params} msPerRun={Math.max(5, lab.ms)} meta={researchMeta} partial={real && range ? range.counts.partial : 0} dataNote={dataNote} onLoad={loadFromStudy} />} />
+                research={<ResearchPanel r={r} lab={lab} params={params} msPerRun={Math.max(5, lab.ms)} meta={researchMeta} partial={real && range ? range.counts.partial : 0} dataNote={dataNote} onLoad={loadFromStudy} />}
+                rolling={rollingState.status === 'off' ? undefined : <RollingView state={rollingState} onCancel={() => rollCancel.current?.()} onRetry={() => setRollRun(null)} onOpen={(w) => setRequest(w)} stamp={slug} />}
+                rollingCount={plan?.windows.length} />
             </>
           )}
           <p className="foot-legal">Straddloop is a research tool. Real-data runs use 1-minute candles without bid/ask, so fills are optimistic. Nothing here is investment advice or a recommendation to trade. Options trading can lose more than the premium involved. Straddloop does not place orders.</p>

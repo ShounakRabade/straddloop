@@ -1,6 +1,6 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ExportKind, LedgerRow, Params, Replay, RunResult } from './types';
+import type { ExportKind, LedgerRow, Params, Replay, RollingResult, RunResult } from './types';
 import type { Research, ResearchProgress, ResearchRequest } from './research';
 
 type State = { status: 'idle' | 'running' | 'done' | 'error'; result: RunResult | null; error: string | null; ms: number };
@@ -12,7 +12,7 @@ export type DayRef = { path: string; buf?: ArrayBuffer };
 export function useLab() {
   const worker = useRef<Worker | null>(null);
   const latest = useRef(0);
-  const waiting = useRef(new Map<number, (r: { ok: boolean; replay?: Replay | null; csv?: string | null; page?: Page | null; research?: Research; error?: string }) => void>());
+  const waiting = useRef(new Map<number, (r: { ok: boolean; replay?: Replay | null; csv?: string | null; page?: Page | null; research?: Research; rolling?: RollingResult; error?: string }) => void>());
   const progressFor = useRef(new Map<number, (p: ResearchProgress) => void>());
   const replays = useRef(0);
   const [state, setState] = useState<State>({ status: 'idle', result: null, error: null, ms: 0 });
@@ -66,5 +66,19 @@ export function useLab() {
     return { done, cancel: () => worker.current?.postMessage({ cancelResearch: id }) };
   }, []);
 
-  return { ...state, run, replay, exportCsv, inspect, fail, research };
+  /** Rolling windows over the latest real run's sessions: each window its own backtest. onProgress gets
+   *  { done, total, label } between windows; `cancel` stops it before the next window. */
+  const rolling = useCallback((req: { params: Params; days: DayRef[]; windows: { from: string; to: string }[] }, onProgress?: (p: ResearchProgress & { label?: string }) => void) => {
+    replays.current += 1;
+    const id = -replays.current;
+    if (onProgress) progressFor.current.set(id, onProgress);
+    const done = new Promise<{ ok: true; rolling: RollingResult } | { ok: false; error: string }>((resolve) => {
+      waiting.current.set(id, (d) => { progressFor.current.delete(id); resolve(d.ok && d.rolling ? { ok: true, rolling: d.rolling } : { ok: false, error: d.error ?? 'Stopped.' }); });
+    });
+    // paths only: the worker decoded these days for the run they belong to
+    worker.current?.postMessage({ id, rolling: { params: req.params, days: req.days.map((d) => ({ path: d.path })), windows: req.windows } });
+    return { done, cancel: () => worker.current?.postMessage({ cancelResearch: id }) };
+  }, []);
+
+  return { ...state, run, replay, exportCsv, inspect, fail, research, rolling };
 }

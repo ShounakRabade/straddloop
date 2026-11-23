@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased: moving through history
+
+* **Range bar** above the results on real data: the selected window (dates, calendar days, sessions), Previous
+  and Next window (same length: 1 Apr–30 Jul 2026 → 31 Jul–28 Nov 2026, or back to 1 Dec 2025–31 Mar 2026), and
+  +30 / +60 / +90 days. A window that runs past the stored data is cut to it and the bar says so ("Stored data ends
+  on 30 Oct 2026: this window has 92 of the 121 days asked for"); a move with nothing stored is disabled with the
+  reason. The length asked for is kept, so moving back after a cut restores the full window.
+* **Presets** 7D, 30D, **60D** (new), 90D (stored sessions), 6M, 1Y, 2Y, 3Y, Max, and **Last N** calendar days or
+  sessions.
+* **Rolling windows**: a window of W calendar days every S days through the selected period (for example 120 every
+  30). They run after the main backtest on the same data, each its own backtest, with progress, cancel and a CSV.
+  The Rolling tab shows how many windows made money, the median, best and worst window, the spread, a bar per
+  window and a table; Open loads a window into the period. Checked: each window equals a backtest of those dates
+  alone, and the windows of 1 Apr–30 Jul 2026 add up to the whole run less the one day no window reaches.
+* Date arithmetic is on calendar days (month lengths, leap years, year ends) in `lib/dateRange.ts`:
+  `windowLength`, `nextWindow`, `prevWindow`, `shiftRange`, `fitWindow`, `lastN`, `rollingWindows`.
+* Fixed after the floor became the first stored day: a request entirely before the stored history said "Nothing
+  is stored after …" (it now says history starts on that day), and the load command could no longer ask for older
+  days (it now asks for the dates requested, back to 1 Jul 2020). The date tests were updated to the stored-history
+  floor; `npm test` and the browser test now pass in full.
+
 ## Unreleased: Lab configuration controls and layout
 
 * **Times.** Entry, last new entry and square-off are picked with a time field instead of long lists: type

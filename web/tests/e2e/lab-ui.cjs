@@ -172,7 +172,8 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
         assert(/10 sessions will run/.test(t), t);
         assert(/17 Oct 2025/.test(t), 'end is the latest stored day, from the data');
         assert(await page.locator('.cal-day[data-date="2025-10-06"][data-state="partial"]').count() === 1, '6 Oct marked partial');
-        assert(await page.locator('.cal-day[data-date="2025-10-02"][data-state="holiday"]').count() === 1, '2 Oct marked holiday');
+        // history starts on the first stored day (6 Oct): 2 Oct is outside it and cannot be picked
+        assert(await page.locator('.cal-day[data-date="2025-10-02"][data-state="outside"]:disabled').count() === 1, '2 Oct is outside the stored history');
         await page.screenshot({ path: path.join(SHOTS, `${name}-4-calendar.png`) });
       });
       await step(`${name}: presets, clicking two days and the keyboard all set the one date range`, async () => {
@@ -201,6 +202,43 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
         assert(/partial/.test(await page.locator('#panel-sessions tbody tr').first().innerText()), 'partial day labelled');
         const l = await layout(page);
         assert(l.sideways <= 1, `sideways ${l.sideways}`);
+      });
+      await step(`${name}: the range bar moves the window, cuts it at the stored history and says so; rolling windows run`, async () => {
+        const now = () => page.locator('.rb-now').innerText();
+        const chip = (t) => page.locator('.rb .rb-chip', { hasText: new RegExp(`^${t.replace('+', '\\+')}$`) });
+        assert(/6 Oct 2025 – 17 Oct 2025/.test(await now()) && /10 sessions/.test(await now()), await now());
+        // all stored history is selected: nothing before or after it
+        assert(await page.locator('.rb-step', { hasText: 'Previous' }).isDisabled() && await page.locator('.rb-step', { hasText: 'Next' }).isDisabled(), 'both moves disabled at the edges');
+        assert(/nothing is stored after 17 Oct 2025/.test(await page.locator('.rb-step', { hasText: 'Next' }).getAttribute('title')));
+        // the last 7 sessions (9–17 Oct, 9 days); the window before it runs into 6 Oct, the first stored day
+        await chip('7D').click();
+        assert(/9 Oct 2025 – 17 Oct 2025/.test(await now()), await now());
+        await page.locator('.rb-step', { hasText: 'Previous' }).click();
+        assert(/6 Oct 2025 – 8 Oct 2025/.test(await now()), await now());
+        assert(/Stored data starts on 6 Oct 2025: this window has 3 of the 9 days asked for/.test(await page.locator('.rb-note').innerText()));
+        // Next goes back to the 9-day window that was asked for, not a 3-day one
+        await page.locator('.rb-step', { hasText: 'Next' }).click();
+        assert(/9 Oct 2025 – 17 Oct 2025/.test(await now()), await now());
+        await chip('60D').click();
+        assert(/6 Oct 2025 – 17 Oct 2025/.test(await now()), '60 sessions: all 10 stored');
+        await page.locator('#rb-n').fill('5'); await page.locator('.rb-unit').selectOption('days'); await chip('Use').click();
+        assert(/13 Oct 2025 – 17 Oct 2025/.test(await now()), await now());
+        await chip('Max').click();
+        // rolling: 5-day windows every 5 days over 6–17 Oct: 6–10 and 11–15 Oct; 16–17 Oct are in no window
+        await page.locator('.rb-check input').check();
+        await page.locator('#rb-w').fill('5'); await page.locator('#rb-s').fill('5');
+        assert(/2 windows · the last 2 days are in no window/.test(await page.locator('.rb-plan').innerText()));
+        await closeSettings(page, w);
+        await runBtn(page, w).click();
+        await page.locator('#tab-rolling').click();
+        await page.locator('#panel-rolling table').waitFor({ timeout: 40000 });
+        const rows = await page.locator('#panel-rolling tbody tr').allInnerTexts();
+        assert.strictEqual(rows.length, 2);
+        assert(/6 Oct 2025 – 10 Oct 2025\s+5\b/.test(rows[0]) && /11 Oct 2025 – 15 Oct 2025\s+3\b/.test(rows[1]), rows.join(' / '));
+        const l = await layout(page);
+        assert(l.sideways <= 1, `sideways ${l.sideways}`);
+        await page.locator('.rb-check input').uncheck();
+        await page.locator('#tab-overview').click();
       });
       await step(`${name}: changing a rule marks the result stale instead of silently re-running real data`, async () => {
         await openSettings(page, w);

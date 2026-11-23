@@ -885,6 +885,39 @@
 
   /** Robustness check of ONE configuration (no search): consistency across chronological thirds,
    *  one-step sensitivity on the given axes, cost stress and Monte Carlo. */
+  // ================================================================== rolling windows
+  /**
+   * The same rules over successive windows of history (the Lab's rolling-window mode). spec: { params, windows:
+   * [{ from, to }], options: { capital } }. runner(params, from, to) returns a run in fromRun's shape for the stored
+   * sessions in [from, to], or null when there are none. Every window is its own backtest: it starts flat, with the
+   * full capital, so windows can be compared with each other but not added up.
+   */
+  async function runRolling(spec, runner, hooks) {
+    hooks = Object.assign({ progress: () => {}, cancelled: () => false, yieldFn: () => Promise.resolve() }, hooks || {});
+    const o = Object.assign({ capital: 500000 }, spec.options || {});
+    const ws = spec.windows || [], rows = [];
+    for (let i = 0; i < ws.length; i++) {
+      if (hooks.cancelled()) throw new Error('cancelled');
+      const w = ws[i];
+      hooks.progress({ done: i, total: ws.length, stage: 'rolling', label: `${w.from} to ${w.to}` });
+      const run = runner(spec.params, w.from, w.to);
+      if (!run) { rows.push({ from: w.from, to: w.to, sessions: 0, traded: 0, net: null, win_rate: null, pf: null, max_dd: null, sharpe: null, best: null, worst: null }); continue; }
+      const p = perf(run.days, o);
+      // sessions = every stored day the window handed to the engine (as the Lab counts them), excluded ones included
+      rows.push({ from: w.from, to: w.to, sessions: p.sessions + p.excluded, traded: p.traded, net: p.net, win_rate: p.win_rate, pf: p.pf, max_dd: p.max_dd, sharpe: p.sharpe, best: p.best, worst: p.worst });
+      await hooks.yieldFn();
+    }
+    hooks.progress({ done: ws.length, total: ws.length, stage: 'rolling' });
+    const nets = rows.filter((r) => r.net != null && r.traded > 0).map((r) => r.net);
+    const sorted = nets.slice().sort((a, b) => a - b);
+    const summary = {
+      windows: rows.length, with_trades: nets.length, positive: nets.filter((x) => x > 0).length,
+      median: sorted.length ? quantile(sorted, 0.5) : null, mean: nets.length ? mean(nets) : null, sd: nets.length > 1 ? sdev(nets) : null,
+      best: nets.length ? maxOf(nets) : null, worst: nets.length ? minOf(nets) : null,
+    };
+    return { rows, summary };
+  }
+
   async function runCheck(spec, runner, hooks) {
     hooks = Object.assign({ progress: () => {}, cancelled: () => false, yieldFn: () => Promise.resolve(), now: () => Date.now() }, hooks || {});
     const t0 = hooks.now();
@@ -1250,5 +1283,5 @@
   return { VERSION, rng, mean, sdev, quantile, t95, ciMean, normCdf, normInv, moments, spearman, sampleClass, maxDrawdown, fromRun, perf,
     UNAVAILABLE_INPUTS, sessionFeatures, DEFAULT_THRESHOLDS, classify, regimeBreakdown, kmeansRegimes, hmmVol, volForecast, entryFilterModel,
     PARAM_SPACE, axisValues, planCandidates, OBJECTIVES, scoreAll, splitChrono, walkForward, pbo, deflatedSharpe, monteCarlo, costScenarios,
-    runOptimisation, runCheck, diagnostics, WEIGHTS, robustness, explain, analyseRun, fmtInr };
+    runOptimisation, runCheck, runRolling, diagnostics, WEIGHTS, robustness, explain, analyseRun, fmtInr };
 });

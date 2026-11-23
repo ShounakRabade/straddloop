@@ -11,8 +11,10 @@ import { outcomeLabel } from '@/lib/outcomes';
 import type { DayOutcome } from '@/lib/types';
 import { Icon, Tip } from './kit';
 
-const PRESETS: { id: Preset; label: string; long: string }[] = [
+/** Quick ranges, ending on the latest stored day. 7D–90D count stored sessions (trading days with data); 6M–3Y are calendar months. */
+export const PRESETS: { id: Preset; label: string; long: string }[] = [
   { id: 'last_7', label: '7D', long: 'Last 7 trading days with data' }, { id: 'last_30', label: '30D', long: 'Last 30 trading days with data' },
+  { id: 'last_60', label: '60D', long: 'Last 60 trading days with data' },
   { id: 'last_90', label: '90D', long: 'Last 90 trading days with data' }, { id: '6m', label: '6M', long: 'Last 6 months' }, { id: '1y', label: '1Y', long: 'Last year' },
   { id: '2y', label: '2Y', long: 'Last 2 years' }, { id: '3y', label: '3Y', long: 'Last 3 years' }, { id: 'max', label: 'Max', long: 'All stored history' },
 ];

@@ -623,3 +623,26 @@ select.in { padding-right: 28px; }
 @media (prefers-reduced-motion: reduce) {
   .lf-sw input, .lf-sw input::after { transition: none; }
 }
+
+/* ---------- range bar: moving through history from the results area ---------- */
+.rb { display: grid; gap: 6px; padding: 8px 0 10px; border-bottom: 1px solid var(--rule); }
+.rb-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
+.rb .lbl { font-size: 0.625rem; }
+.rb-step { min-height: 30px; }
+.rb-now { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 3px 12px; min-height: 30px; border: 1.5px solid var(--ink); border-radius: var(--r-sm); background: var(--card); }
+.rb-now b { font-family: var(--font-mono); font-size: var(--t-sm); font-weight: 650; white-space: nowrap; }
+.rb-now span { font-family: var(--font-mono); font-size: 0.6875rem; color: var(--ink-2); white-space: nowrap; }
+.rb-sep { width: 1px; align-self: stretch; background: var(--rule-2); margin: 0 4px; }
+.rb-chip { min-height: 28px; padding: 2px 8px; font-family: var(--font-mono); font-size: 0.75rem; }
+.rb-n { width: 64px; min-height: 28px; padding: 2px 8px; font-family: var(--font-mono); font-size: var(--t-sm); }
+.rb-unit { width: auto; min-height: 28px; padding: 2px 26px 2px 8px; font-size: var(--t-sm); }
+.rb-u { font-size: var(--t-sm); color: var(--ink-2); }
+.rb-check { display: inline-flex; align-items: center; gap: 6px; font-size: var(--t-sm); font-weight: 620; cursor: pointer; }
+.rb-check input { width: 16px; height: 16px; margin: 0; accent-color: var(--ink); }
+.rb-plan { font-size: var(--t-sm); color: var(--ink-2); }
+.rb-plan b { font-family: var(--font-mono); color: var(--ink); }
+.rb-note { font-size: var(--t-sm); padding: 4px 8px; background: color-mix(in oklch, var(--marker) 30%, var(--canvas)); border-radius: var(--r-sm); justify-self: start; }
+@media (max-width: 760px) {
+  .rb-sep { display: none; }
+  .rb-now { order: -1; flex-basis: 100%; }
+}

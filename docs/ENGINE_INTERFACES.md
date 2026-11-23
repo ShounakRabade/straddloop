@@ -369,7 +369,7 @@ A re-entered leg joins the same position.
 interface DateRange {
   request: { from: string; to: string };     // what the user picked, inclusive
   dataset: { source: 'dhan' | 'synthetic' | 'local'; underlying: string; series: Series; interval: '1m' };
-  bounds: { floor: '2023-01-01'; earliest: string | null; latest_validated: string | null; latest_any: string | null };
+  bounds: { floor: string; earliest: string | null; latest_validated: string | null; latest_any: string | null }; // floor = the earliest stored day
   effective: { from: string; to: string } | null; // request clamped to [floor, min(latest_any, today IST)]; null if nothing left
   files: { date: string; path: string }[];   // the day files the run downloads (one per runnable date)
   days: DayEntry[];                          // every calendar day in `effective`, weekends included
@@ -391,14 +391,40 @@ interface DayEntry {
 Rules: `runnable` = validated + partial days that have a file (partial days run; their gaps stay gaps).
 A weekday with no file is `holiday` when the pipeline recorded one or the (unverified) NSE list names it,
 otherwise `missing`. Weekends are never "missing". The end date is never hardcoded: `bounds.latest_*` come
-from the database for the chosen underlying and series. Presets end on `latest_any` (the last day a run can
-use). `last_7/30/90` count stored usable days backwards; `6m/1y/2y/3y` start the day after the same calendar
+from the database for the chosen underlying and series, and so does the start: history begins on the series'
+earliest stored day (`FLOOR` 2023-01-01 is only a fallback when nothing is stored). A request that falls
+entirely before it says so ("Stored history starts on …"); one entirely after the last stored day says that.
+`loadCommand` asks for the dates as requested, older ones included, but not before `LOAD_FLOOR` (2020-07-01,
+where the dated charge table starts). Presets end on `latest_any` (the last day a run can use).
+`last_7/30/60/90` count stored usable days backwards; `6m/1y/2y/3y` start the day after the same calendar
 date N months earlier, clamped to `earliest`; `max` = `earliest` → `latest_any`.
 
 `buildDateRange(request, inventory, statuses, opts)` options: `source` ('dhan' | 'local': local files are
-`partial`, quality unchecked), `underlying`, `series`, `floor` (default 2023-01-01), `today` (default today in
-IST). The NSE holiday list (`NSE_HOLIDAYS_UNVERIFIED`, 2023–2025, recalled, not verified) is built in and
+`partial`, quality unchecked), `underlying`, `series`, `floor` (default: the earliest stored day), `today`
+(default today in IST). The NSE holiday list (`NSE_HOLIDAYS_UNVERIFIED`, 2023–2025, recalled, not verified) is built in and
 only labels weekdays that have no file.
+
+### Moving through history (Lab range bar, rolling windows)
+
+Windows are calendar days, both ends included, on UTC dates, so month lengths and leap days are exact:
+
+```ts
+windowLength({ from, to }): number            // 1 Apr–30 Jul 2026 = 121
+nextWindow(r, len?) / prevWindow(r, len?)     // the adjacent window, `len` days (default r's own length):
+                                              //   1 Apr–30 Jul 2026 → 31 Jul–28 Nov 2026; before it 1 Dec 2025–31 Mar 2026
+shiftRange(r, n, len?)                        // moved n days (the +30 / +60 / +90 buttons)
+fitWindow(target, bounds): { range | null; cut: start | end | both | null; kept; asked; outside: before | after | null }
+                                              // cut to the stored history, never moved; null when none of it is stored
+lastN(n, sessions | days, inventory)      // the last N stored sessions or calendar days, ending on latest_any
+rollingWindows(span, W, S): { windows; leftover; capped }   // whole W-day windows every S days; at most MAX_WINDOWS (400)
+```
+
+The range bar keeps the length that was asked for: a window cut at the end of the data does not make the next
+move shorter. Rolling windows run in the worker (`{ id, rolling: { params, days, windows } }`, progress and cancel
+as for research) through `analytics.runRolling`: each window is its own backtest through `compute.evaluate`,
+started flat with the full capital, so the latest run, its replay and its exports are untouched; rows carry
+sessions (all handed to the engine), traded days, net, win rate, max drawdown, Sharpe, profit factor, best and
+worst day.
 
 Every surface reads this one object: the calendar shades `days`, the run downloads `runnable`, progress
 counts `runnable.length`, the result carries `range.key`, and the report prints `counts`. The run result's

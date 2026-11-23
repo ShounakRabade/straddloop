@@ -27,7 +27,7 @@ export type LabApi = {
   replay: (date: string) => Promise<import('@/lib/types').Replay | null>;
 };
 export type Baseline = { label: string; dataKey: string; strategy: string; m: Record<string, number | null> };
-export type TabId = 'overview' | 'capital' | 'charts' | 'trades' | 'sessions' | 'replay' | 'research' | 'diagnostics' | 'ledger';
+export type TabId = 'overview' | 'capital' | 'charts' | 'trades' | 'sessions' | 'rolling' | 'replay' | 'research' | 'diagnostics' | 'ledger';
 
 const tone = (v: number | null | undefined) => (v == null ? '' : v > 0 ? 'gain' : v < 0 ? 'loss' : '');
 const n = (v: unknown) => (typeof v === 'number' && isFinite(v) ? v : null);
@@ -439,13 +439,15 @@ function LedgerPanel({ r, lab, stamp }: { r: RunResult; lab: LabApi; stamp: stri
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'overview', label: 'Overview' }, { id: 'capital', label: 'Capital & margin' }, { id: 'charts', label: 'Charts' }, { id: 'trades', label: 'Trades' },
-  { id: 'sessions', label: 'Sessions' }, { id: 'replay', label: 'Replay' }, { id: 'research', label: 'Research' }, { id: 'diagnostics', label: 'Diagnostics' }, { id: 'ledger', label: 'Ledger & export' },
+  { id: 'sessions', label: 'Sessions' }, { id: 'rolling', label: 'Rolling' }, { id: 'replay', label: 'Replay' }, { id: 'research', label: 'Research' }, { id: 'diagnostics', label: 'Diagnostics' }, { id: 'ledger', label: 'Ledger & export' },
 ];
 
-export function ResultTabs({ r, lab, range, real, slip, tab, setTab, research }: {
+export function ResultTabs({ r, lab, range, real, slip, tab, setTab, research, rolling, rollingCount }: {
   r: RunResult; lab: LabApi; range: DateRange | null; real: boolean; slip: number | undefined; tab: TabId; setTab: (t: TabId) => void;
   /** The research panel. It mounts the first time its tab opens and then stays mounted, so a running study survives a tab change. */
   research?: React.ReactNode;
+  /** Rolling-window results (real data, when the mode is on); the tab is shown only then. */
+  rolling?: React.ReactNode; rollingCount?: number;
 }) {
   const [researchSeen, setResearchSeen] = useState(false);
   useEffect(() => { if (tab === 'research') setResearchSeen(true); }, [tab]);
@@ -463,9 +465,9 @@ export function ResultTabs({ r, lab, range, real, slip, tab, setTab, research }:
     return () => { live = false; };
   }, [rev, inspect, r.account]);
   const replayable = r.strategy !== 'fourleg' && r.curve.length > 0;
-  const tabs = TABS.filter((t) => (t.id !== 'replay' || replayable) && (t.id !== 'research' || !!research));
+  const tabs = TABS.filter((t) => (t.id !== 'replay' || replayable) && (t.id !== 'research' || !!research) && (t.id !== 'rolling' || rolling != null));
   if (!tabs.some((t) => t.id === tab)) tab = 'overview';
-  const counts: Partial<Record<TabId, number>> = { trades: trades?.length, sessions: r.days?.length };
+  const counts: Partial<Record<TabId, number>> = { trades: trades?.length, sessions: r.days?.length, rolling: rollingCount };
   const m = r.account?.report.margin;
   const alarms = m ? [
     Number(m.rejected_trades) ? `${m.rejected_trades} trade${Number(m.rejected_trades) === 1 ? ' was' : 's were'} rejected for insufficient margin and ${Number(m.rejected_trades) === 1 ? 'is' : 'are'} not in the P&L.` : null,
@@ -510,6 +512,7 @@ export function ResultTabs({ r, lab, range, real, slip, tab, setTab, research }:
         </div>
       )}
       {tab === 'sessions' && <SessionsPanel r={r} range={real ? range : null} onReplay={replay} />}
+      {tab === 'rolling' && rolling != null && <div className="panel" role="tabpanel" id="panel-rolling" aria-labelledby="tab-rolling">{rolling}</div>}
       {tab === 'replay' && replayable && (
         <div className="panel" role="tabpanel" id="panel-replay" aria-labelledby="tab-replay">
           <ReplayPanel key={`${rev}-${replayDate ?? ''}`} r={r} load={lab.replay} initialDate={replayDate} bare />

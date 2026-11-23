@@ -8,7 +8,7 @@
     "start": "next start",
     "precompute": "node scripts/precompute.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/ledger.test.mjs tests/daterange.test.mts tests/outcomes.test.mjs tests/workspace.test.mts tests/analytics.test.mjs tests/researchSpace.test.mts tests/legs.test.mts tests/registry.test.mts tests/controls.test.mts tests/longrange.test.mjs tests/golden.test.mts",
+    "test": "node --experimental-strip-types --test tests/ledger.test.mjs tests/daterange.test.mts tests/outcomes.test.mjs tests/workspace.test.mts tests/analytics.test.mjs tests/researchSpace.test.mts tests/legs.test.mts tests/registry.test.mts tests/controls.test.mts tests/rolling.test.mts tests/longrange.test.mjs tests/golden.test.mts",
     "test:long": "node --experimental-strip-types --test tests/longrange.slow.test.mjs",
     "golden": "node --experimental-strip-types scripts/golden.mts"
   },
