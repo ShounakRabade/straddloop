@@ -509,8 +509,18 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
     const l = await layout(page);
     assert(l.sideways <= 1, `sideways ${l.sideways}`);
     await page.screenshot({ path: path.join(SHOTS, 'compare.png'), fullPage: true });
+    // pins last for this browser tab: a reload keeps them, and knows the run on screen is one of them
+    await page.reload();
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    await settled(page);
+    assert.strictEqual(await page.locator('.pin-tray li').count(), 2, 'both pins are still there after a reload');
+    assert.strictEqual(await page.locator('.run-head button[aria-pressed="true"]', { hasText: 'Pinned' }).count(), 1, 'the default straddle on screen is recognised as pinned');
     await page.locator('.pin-tray .pin-x').first().click();
     assert.strictEqual(await page.locator('.pin-tray li').count(), 1, 'unpinned from the tray');
+    await page.reload();
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    await settled(page);
+    assert.strictEqual(await page.locator('.pin-tray li').count(), 1, 'the unpin is kept too');
     await ctx.close();
   });
   if (DAYS) {

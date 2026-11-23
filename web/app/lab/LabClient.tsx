@@ -44,6 +44,13 @@ const SOURCE_KEY = 'straddloop.source';
 const RAIL_KEY = 'straddloop.rail';
 const AUTO_KEY = 'straddloop.autorun';
 const ROLL_KEY = 'straddloop.rolling';
+const PINS_KEY = 'straddloop.pins';   // pinned runs, kept for this browser tab (sessionStorage)
+/** A stored pin is used only when it has the shape the Compare tab reads; anything else is dropped. */
+const isPin = (x: unknown): x is Pin => {
+  const p = x as Pin;
+  return !!p && typeof p.key === 'string' && typeof p.label === 'string' && typeof p.dataKey === 'string' && !!labStrategy(String(p.slug))
+    && !!p.m && typeof p.m === 'object' && Array.isArray(p.curve) && !!p.params && typeof p.params === 'object';
+};
 const TAB_IDS: TabId[] = ['overview', 'capital', 'charts', 'trades', 'legs', 'sessions', 'compare', 'rolling', 'replay', 'research', 'diagnostics', 'ledger'];
 const NO_STATUS: StatusRow[] = [];
 const ROLE_ORDER: TimeRole[] = ['entry', 'last_entry', 'exit'];
@@ -89,6 +96,15 @@ export function LabClient() {
   const [tried, setTried] = useState<string | null>(null);  // config key of the last run asked for
   const [meta, setMeta] = useState<Meta | null>(null);      // config of the result on screen
   const [pins, setPins] = useState<Pin[]>([]);              // runs kept for the Compare tab (at most MAX_PINS)
+  // pins last for this browser tab: restored on load, saved on every later change (the first, empty state is never saved)
+  const pinsSaveReady = useRef(false);
+  useEffect(() => {
+    try { const v = JSON.parse(sessionStorage.getItem(PINS_KEY) ?? 'null'); if (Array.isArray(v)) setPins(v.filter(isPin).slice(0, MAX_PINS)); } catch { /* storage blocked or unreadable: start empty */ }
+  }, []);
+  useEffect(() => {
+    if (!pinsSaveReady.current) { pinsSaveReady.current = true; return; }
+    try { if (pins.length) sessionStorage.setItem(PINS_KEY, JSON.stringify(pins)); else sessionStorage.removeItem(PINS_KEY); } catch { /* storage full or blocked: pins stay for this page only */ }
+  }, [pins]);
   const [baseline, setBaseline] = useState<(Baseline & { key: string }) | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
   const [note, setNote] = useState('');

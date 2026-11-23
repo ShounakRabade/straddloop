@@ -15,6 +15,7 @@
   cumulative curves on one chart and every headline figure in one table, each with its settings and run fingerprint;
   Load settings puts a pinned run's strategy and settings back in the panel. Pins on other data are listed apart, not
   compared. The headline deltas compare with the first pin on the same data (otherwise the default rules, as before).
+  Pins are kept for the browser tab (sessionStorage): a reload keeps them, and closing the tab clears them.
 * The run header describes the run on screen ("Changed: …"), not the panel as it is now.
 * Result tabs: Capital and Ledger have short names and the tabs sit a little closer. When they are still wider than the
   space (twelve tabs on real data, or a narrow window), the strip fades at the edge that has more, and the open tab is
