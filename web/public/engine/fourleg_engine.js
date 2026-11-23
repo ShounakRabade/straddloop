@@ -8,6 +8,11 @@
   else root.FourLegEngine = factory(root.StraddleEngine);
 })(typeof self !== 'undefined' ? self : this, function (SE) {
   'use strict';
+  // min / max by loop. Math.min(...xs) passes every element as a call argument and overflows the call stack
+  // ("Maximum call stack size exceeded") once xs grows past roughly 100k items (a long range, many trades, many
+  // configurations). Same results as Math.min / Math.max, including NaN, empty input and signed zero.
+  function maxOf(a) { let m = -Infinity; for (let i = 0; i < a.length; i++) { const x = +a[i]; if (x !== x) return NaN; if (x > m || (x === 0 && m === 0 && 1 / x > 0)) m = x; } return m; }
+  function minOf(a) { let m = Infinity; for (let i = 0; i < a.length; i++) { const x = +a[i]; if (x !== x) return NaN; if (x < m || (x === 0 && m === 0 && 1 / x < 0)) m = x; } return m; }
   const { bs, mulberry32, fillCost, parseCSV } = SE;
 
   // ------------------------------------------------------------------ helpers
@@ -602,7 +607,7 @@
       ci95: n > 1 ? [mean - 1.96 * sd / Math.sqrt(n), mean + 1.96 * sd / Math.sqrt(n)] : null,
       win_rate: 100 * wins.length / n,
       profit_factor: losses.length && sum(losses) < 0 ? sum(wins) / -sum(losses) : null,
-      largest_win: Math.max(...nets), largest_loss: Math.min(...nets),
+      largest_win: maxOf(nets), largest_loss: minOf(nets),
       pct_target: 100 * hits.length / n,
       avg_days_to_target: hits.length ? sum(hits.map(r => r.days_to_target)) / hits.length : null,
       avg_days_held: sum(traded.map(r => r.days_held)) / n,
@@ -611,14 +616,14 @@
       avg_roac_pct: sum(traded.map(r => r.roac)) / n,
       total_roac_pct: 100 * sum(nets) / sum(traded.map(r => r.allocated)),
       avg_margin0: sum(traded.map(r => r.margin0)) / n,
-      max_adverse_mtm: Math.min(...traded.map(r => r.mae)),
+      max_adverse_mtm: minOf(traded.map(r => r.mae)),
       avg_adverse_mtm: sum(traded.map(r => r.mae)) / n,
       avg_margin_change_pct: sum(traded.map(r => r.margin_change_pct)) / n,
-      max_margin_change_pct: Math.max(...traded.map(r => r.margin_change_pct)),
+      max_margin_change_pct: maxOf(traded.map(r => r.margin_change_pct)),
       costs_pct_of_gross_profit: grossProfit > 0 ? 100 * costs / grossProfit : null,
       exit_reasons: counter(traded.map(r => r.exit_reason)),
       pct_itm_at_exit: 100 * traded.filter(r => r.phys.itm_legs > 0).length / n,
-      max_deliverable_notional: Math.max(...traded.map(r => r.phys.notional)),
+      max_deliverable_notional: maxOf(traded.map(r => r.phys.notional)),
       settled_physically: traded.filter(r => r.exit_reason === 'expiry_settlement').length,
       short_delivery_months: traded.filter(r => r.flags.includes('short_delivery_risk')).length,
       flags: counter(traded.flatMap(r => r.flags)),
@@ -674,10 +679,10 @@
       const wa = rows.filter(r => r.worst_after != null).map(r => r.worst_after);
       Object.assign(out, {
         held_incremental_mean: sum(hi) / hi.length, held_incremental_median: pct(hi.slice().sort((a, b) => a - b), 50),
-        held_pct_helped: 100 * hi.filter(x => x > 0).length / hi.length, held_worst: Math.min(...hi), held_best: Math.max(...hi),
+        held_pct_helped: 100 * hi.filter(x => x > 0).length / hi.length, held_worst: minOf(hi), held_best: maxOf(hi),
         held_extra_days_avg: sum(rows.map(r => r.extra_days)) / rows.length, held_capital_cost: capSum,
         held_incremental_after_capital: sum(hi) - capSum,
-        held_worst_mtm_after_a_exit: wa.length ? Math.min(...wa) : null, held_rows: rows,
+        held_worst_mtm_after_a_exit: wa.length ? minOf(wa) : null, held_rows: rows,
       });
     }
     return out;

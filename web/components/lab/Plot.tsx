@@ -5,6 +5,7 @@
  */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
 import { shortDate } from '@/lib/format';
+import { maxOf, minOf } from '@/lib/stats';
 
 function useWidth<T extends HTMLElement>() {
   const ref = useRef<T>(null);
@@ -64,7 +65,7 @@ export function LinePlot({ points, second, area = 'signed', fmt, axisFmt = compa
   const geo = useMemo(() => {
     const vals = [...points, ...(second ?? [])].map((p) => p.v).filter((v): v is number => v != null && isFinite(v));
     if (!vals.length) return null;
-    let lo = Math.min(...vals), hi = Math.max(...vals);
+    let lo = minOf(vals), hi = maxOf(vals);
     if (zero) { lo = Math.min(0, lo); hi = Math.max(0, hi); }
     if (hi === lo) { hi += 1; lo -= 1; }
     const pad = (hi - lo) * 0.06; lo -= pad; hi += pad;
@@ -161,7 +162,7 @@ export function Histogram({ values, bins = 16, fmt, label, unit, height = 240, s
   const [ref, W] = useWidth<HTMLDivElement>();
   const data = useMemo(() => {
     if (!values.length) return null;
-    let lo = Math.min(...values), hi = Math.max(...values);
+    let lo = minOf(values), hi = maxOf(values);
     if (hi === lo) { lo -= 1; hi += 1; }
     const k = Math.max(4, Math.min(bins, Math.ceil(Math.sqrt(values.length) * 2)));
     const w = (hi - lo) / k;

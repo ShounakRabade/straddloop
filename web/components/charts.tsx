@@ -1,4 +1,5 @@
 import { inr } from '@/lib/format';
+import { maxOf, minOf } from '@/lib/stats';
 
 const compact = (v: number) => {
   const a = Math.abs(v), s = v < 0 ? '−' : '';
@@ -11,7 +12,7 @@ export function EquityChart({ points, draw = true, height = 260, label, id = 'eq
   const W = 640, H = height, L = 52, R = 14, T = 14, B = 26;
   if (points.length < 2) return null;
   const vals = points.map((p) => p.v);
-  let lo = Math.min(0, ...vals), hi = Math.max(0, ...vals);
+  let lo = Math.min(0, minOf(vals)), hi = Math.max(0, maxOf(vals));
   if (hi === lo) hi = lo + 1;
   const pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
   const x = (i: number) => L + (i / (points.length - 1)) * (W - L - R);
@@ -19,7 +20,7 @@ export function EquityChart({ points, draw = true, height = 260, label, id = 'eq
   const line = points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(p.v).toFixed(1)}`).join('');
   const area = `${line}L${x(points.length - 1).toFixed(1)} ${y(0).toFixed(1)}L${x(0).toFixed(1)} ${y(0).toFixed(1)}Z`;
   const last = points[points.length - 1], y0 = y(0);
-  const ticks = [Math.max(...vals), Math.min(...vals)].filter((v) => Math.abs(y(v) - y0) > 16);
+  const ticks = [maxOf(vals), minOf(vals)].filter((v) => Math.abs(y(v) - y0) > 16);
   return (
     <svg className={`chart ${draw ? 'draw' : ''}`} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={label}>
       <defs>

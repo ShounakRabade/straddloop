@@ -10,6 +10,7 @@ import { GLOSSARY } from '@/lib/glossary';
 import { narrate, byExit } from '@/lib/narrative';
 import { outcomeLabel, outcomesOf } from '@/lib/outcomes';
 import { rollingSharpe, rollingVol } from '@/lib/rolling';
+import { maxOf, minOf } from '@/lib/stats';
 import { holdMinutes } from '@/lib/tradeFilter';
 import type { DateRange } from '@/lib/dateRange';
 import type { ExportKind, LedgerRow, Report, RunResult } from '@/lib/types';
@@ -62,7 +63,7 @@ function Metric({ k, label, tip, def, value, sub, cls = '', lead = false, delta,
 function Spark({ r }: { r: RunResult }) {
   const pts = r.curve.map((p) => p.v);
   if (pts.length < 2) return null;
-  const all = [0, ...pts], lo = Math.min(...all), hi = Math.max(...all), span = hi - lo || 1;
+  const lo = Math.min(0, minOf(pts)), hi = Math.max(0, maxOf(pts)), span = hi - lo || 1;
   const W = 240, H = 44, x = (i: number) => (i / (pts.length - 1)) * W, y = (v: number) => H - 2 - ((v - lo) / span) * (H - 4);
   return (
     <svg className="spark" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true">

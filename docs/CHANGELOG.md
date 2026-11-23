@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased: long ranges no longer overflow the stack
+
+* Root cause of "Maximum call stack size exceeded": `Math.min(...xs)` / `Math.max(...xs)` pass every element as a call
+  argument, and V8 throws once an array passes roughly 100k items. The India VIX summary hit it first (one value per
+  1-minute bar, about 92k a year). Every such call over data that grows with the range, the trade count or the number
+  of configurations now uses a loop (`maxOf` / `minOf` in each engine file, `web/lib/stats.ts` in the UI) in the
+  engines, the ledger report, the analytics and the charts. Calls over one session's bars, one structure's legs or
+  strikes are bounded and unchanged.
+* Ledger: tagging a closed leg's fills with its trade number searched every fill of the run, making a run O(fills²).
+  It now keeps direct references; 20k trades book in about 0.26 s instead of 1.8 s.
+* Results are unchanged: `tests/golden.json` fingerprints every engine (Strategy 01 and variants, ORB, EMA pullback,
+  the four-leg model and every runnable leg template) and `tests/golden.real.json` six of them on real day files;
+  both were recorded before the change and still match.
+* New tests: `tests/longrange.test.mjs` (VIX over 150k bars, 250k-session metrics, a 130k-trade ledger; each fails
+  with the old code), `tests/golden.test.mts`, and `npm run test:long` (1,500 synthetic sessions through every engine
+  and a small study). `npm test` now passes `--experimental-strip-types`, so the `.mts` tests run on Node 22.
+
 ## Unreleased: Dhan rate limits and failed days
 
 * A rate limit (HTTP 429 or DH-904) now waits in minutes: 1, 2, 4, 8, then 10 minutes between the six tries
