@@ -287,6 +287,7 @@ runnable days in the `DateRange`, and every runnable day has exactly one outcome
 interface PositionRecord {
   id: string;                                // 'P1', 'P2', …
   opened: { date: string; t: number }; closed: { date: string; t: number } | null;
+  spot: number;                              // the index when the position opened
   legs: { id: string; leg: string; kind: 'initial' | 'reentry'; action: Action; right: Right; strike: number;
           expiry: string; qty: number; entry_date: string; entry_t: number; entry_px: number;
           exit_date: string | null; exit_t: number | null; exit_px: number | null; exit_reason: string | null;

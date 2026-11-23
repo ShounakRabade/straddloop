@@ -831,7 +831,7 @@
 
     checkFills(results, positions);
     const records = positions.map(p => ({
-      id: p.id, opened: p.opened, closed: p.closed, entry_premium: p.entry_premium, exit_reason: p.exit_reason || 'open', gross: p.gross, charges: p.charges, net: p.net, payoff: p.payoff,
+      id: p.id, opened: p.opened, closed: p.closed, spot: p.spot, entry_premium: p.entry_premium, exit_reason: p.exit_reason || 'open', gross: p.gross, charges: p.charges, net: p.net, payoff: p.payoff,
       flags: [...p.flags],
       legs: p.legs.map(l => ({ id: l.id, leg: l.spec_id, kind: l.kind, action: l.action, right: l.right, strike: l.strike, expiry: l.expiry, qty: l.qty, entry_date: l.entry_date, entry_t: l.entry_t,
         entry_px: l.entry_px, exit_date: l.exit_date, exit_t: l.exit_t, exit_px: l.exit_px, exit_reason: l.exit_reason, gross: l.gross, charges: l.cost, net: l.net })),

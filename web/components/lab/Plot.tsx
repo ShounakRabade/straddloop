@@ -208,3 +208,65 @@ export function Histogram({ values, bins = 16, fmt, label, unit, height = 240, s
     </div>
   );
 }
+
+/**
+ * A position's value at expiry across index levels: x is the index, y is rupees (green above zero, red below).
+ * Strikes are dotted verticals, breakevens are marked on the zero line, the index at entry is a dashed cobalt line.
+ * The readout follows the pointer or the arrow keys.
+ */
+export function PayoffPlot({ pts, strikes, breakevens, spot, fmt, label, height = 300 }: {
+  pts: { x: number; v: number }[]; strikes: number[]; breakevens: number[]; spot: number | null;
+  fmt: (v: number) => string; label: string; height?: number;
+}) {
+  const [ref, W] = useWidth<HTMLDivElement>();
+  const { i, setI, onKey } = useCursor(pts.length);
+  const H = height, L = 62, R = 14, T = 22, B = 28;
+  const geo = useMemo(() => {
+    if (pts.length < 2) return null;
+    const x0 = pts[0].x, x1 = pts[pts.length - 1].x;
+    const vs = pts.map((p) => p.v);
+    let lo = Math.min(0, minOf(vs)), hi = Math.max(0, maxOf(vs));
+    if (hi === lo) { hi += 1; lo -= 1; }
+    const pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
+    const x = (v: number) => L + ((v - x0) / (x1 - x0 || 1)) * (W - L - R);
+    const y = (v: number) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+    const line = pts.map((p, k) => `${k ? 'L' : 'M'}${x(p.x).toFixed(1)} ${y(p.v).toFixed(1)}`).join('');
+    const shade = `${line}L${x(x1).toFixed(1)} ${y(0).toFixed(1)}L${x(x0).toFixed(1)} ${y(0).toFixed(1)}Z`;
+    return { x, y, line, shade, x0, x1, yt: niceTicks(lo, hi, H > 240 ? 4 : 3), xt: niceTicks(x0, x1, W > 560 ? 6 : 3) };
+  }, [pts, W, H]);
+  if (!geo) return <div className="plot-empty">No values to plot.</div>;
+  const cur = i != null ? pts[i] : null;
+  const move = (e: PointerEvent<SVGSVGElement>) => {
+    const r = (e.currentTarget as SVGSVGElement).getBoundingClientRect();
+    const xv = geo.x0 + ((e.clientX - r.left - L) / Math.max(1, r.width - L - R)) * (geo.x1 - geo.x0);
+    let k = 0; for (let j = 1; j < pts.length; j++) if (Math.abs(pts[j].x - xv) < Math.abs(pts[k].x - xv)) k = j;
+    setI(k);
+  };
+  const idx = (v: number) => v.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+  const clipId = `pf${pts.length}${Math.round(pts[0].x)}`;
+  return (
+    <div className="plot" ref={ref}>
+      <div className="plot-read" aria-live="polite">
+        {cur ? <><span>Index at expiry {idx(cur.x)}</span><b>{fmt(cur.v)}</b>{spot != null && <span>{cur.x >= spot ? '+' : '−'}{(Math.abs(cur.x - spot) / spot * 100).toFixed(1)}% from entry</span>}</>
+          : <span>Hover or focus the chart and use ← → to read the value at each index level</span>}
+      </div>
+      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={label} tabIndex={0} onKeyDown={onKey}
+        onPointerMove={move} onPointerLeave={() => setI(null)} onPointerDown={move} style={{ touchAction: 'pan-y' }}>
+        <defs>
+          <clipPath id={`${clipId}u`}><rect x={L} y={0} width={W - L - R} height={geo.y(0)} /></clipPath>
+          <clipPath id={`${clipId}d`}><rect x={L} y={geo.y(0)} width={W - L - R} height={H} /></clipPath>
+        </defs>
+        {geo.yt.map((v) => <g key={v}><line className="gd" x1={L} x2={W - R} y1={geo.y(v)} y2={geo.y(v)} /><text x={L - 8} y={geo.y(v) + 4} textAnchor="end">{compactInr(v)}</text></g>)}
+        {geo.xt.map((v) => <text key={v} x={geo.x(v)} y={H - 8} textAnchor="middle">{idx(v)}</text>)}
+        <path className="ar-g" d={geo.shade} clipPath={`url(#${clipId}u)`} />
+        <path className="ar-l" d={geo.shade} clipPath={`url(#${clipId}d)`} />
+        <line className="ax" x1={L} x2={W - R} y1={geo.y(0)} y2={geo.y(0)} />
+        {strikes.map((k) => <g key={k}><line className="pf-k" x1={geo.x(k)} x2={geo.x(k)} y1={T} y2={H - B} /><text className="pf-kt" x={geo.x(k)} y={T - 6} textAnchor="middle">{idx(k)}</text></g>)}
+        {spot != null && spot >= geo.x0 && spot <= geo.x1 && <line className="pf-spot" x1={geo.x(spot)} x2={geo.x(spot)} y1={T} y2={H - B} />}
+        <path className="ln" d={geo.line} />
+        {breakevens.filter((b) => b >= geo.x0 && b <= geo.x1).map((b) => <circle key={b} className="pf-be" cx={geo.x(b)} cy={geo.y(0)} r={4} />)}
+        {cur && <g><line className="cur" x1={geo.x(cur.x)} x2={geo.x(cur.x)} y1={T} y2={H - B} /><circle className="dot2" cx={geo.x(cur.x)} cy={geo.y(cur.v)} r={4} /></g>}
+      </svg>
+    </div>
+  );
+}

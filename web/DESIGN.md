@@ -107,6 +107,14 @@ full-width results area. Source: `app/lab/lab.css`, components in `components/la
   evidence*, out-of-sample cobalt, robust green) with its held-out test in a tinted column; then the checks as
   figures, the compare table and the ranked table. Curves shade training, validation and held-out test as
   bands; comparison lines differ by dash as well as colour.
+- **Legs and payoff** (`LegsPanel`, `PayoffPlot`): the per-leg table closes on a ruled total row that equals the
+  net P&L. The payoff chart's x axis is the index (not dates): green above zero, red below, strikes as dotted
+  verticals labelled at the top, breakevens as open circles on the zero line, the index at entry as a dashed cobalt
+  line. Its caption always says what the position actually did.
+- **Compare** (`Compare.tsx`): pinned runs are chips in a tray above the results (a dashed chip = other data, not
+  compared). In the Compare tab each run is a column headed by its line style, so the chart and the table read
+  together; the run on screen is always first and solid cobalt, pins follow as red dashed, green dotted, ink
+  dash-dot and grey dotted, so lines differ by pattern as well as colour.
 - **Run progress** says what the engine reports, never an estimate: the Run button and the status pill carry the
   short form (Downloading 3/40, Unpacking 12/82, Session 120/244, Booking ledger), the empty state and the strip
   above a result the long form with a bar (determinate only when there is a count). While a run works, a red

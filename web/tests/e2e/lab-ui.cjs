@@ -459,6 +459,60 @@ const runBtn = (page, w) => page.locator(narrow(w) ? '.ws-mbar .run-btn' : '.rai
     await page.screenshot({ path: path.join(SHOTS, 'opt-phone.png'), fullPage: true });
     await ctx.close();
   });
+  const settled = (page) => page.waitForFunction(() => document.querySelector('.ws-status')?.getAttribute('data-state') === 'done', null, { timeout: 30000 });
+  await step('legs tab: one row per leg of the structure, adding up to the net; positions by exit; the payoff at expiry', async () => {
+    const { ctx, page } = await ctxFor(1366, 768);
+    await page.goto(`${BASE}/lab?s=iron_condor`);
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    await settled(page);
+    await page.locator('#tab-legs').click();
+    await page.locator('.legs-tbl tbody tr').first().waitFor();
+    assert.deepStrictEqual(await page.locator('.legs-tbl tbody td.t b').allInnerTexts(), ['L1 · Buy PE', 'L2 · Sell PE', 'L3 · Sell CE', 'L4 · Buy CE']);
+    const total = (await page.locator('.legs-tbl tfoot td').nth(3).innerText()).trim();
+    assert.strictEqual(total, (await page.locator('.exec .m--lead .m-v').innerText()).trim(), 'the legs add up to the net P&L');
+    assert(/Closed by/i.test(await page.locator('#pos-h').locator('xpath=../..').innerText()), 'positions by exit');
+    await page.locator('#payoff-h').scrollIntoViewIfNeeded();
+    assert(await page.locator('.plot .pf-be').count() >= 2, 'an iron condor has two breakevens');
+    const cap = () => page.locator('#payoff-h').locator('xpath=../..').locator('.chart-cap').innerText();
+    const before = await cap();
+    const opts = await page.locator('#payoff-h').locator('xpath=..').locator('select option').allInnerTexts();
+    await page.locator('#payoff-h').locator('xpath=..').locator('select').selectOption({ index: 1 });
+    assert.notStrictEqual(await cap(), before, `another position (${opts[1]}) is drawn`);
+    const l = await layout(page);
+    assert(l.sideways <= 1, `sideways ${l.sideways}`);
+    await page.screenshot({ path: path.join(SHOTS, 'legs.png'), fullPage: true });
+    await ctx.close();
+  });
+  await step('compare: runs pinned on the same data sit side by side, and the headline compares with the first pin', async () => {
+    const { ctx, page } = await ctxFor(1366, 768);
+    await page.goto(`${BASE}/lab?s=straddle`);
+    await page.locator('.exec').waitFor({ timeout: 30000 });
+    await settled(page);
+    const first = (await page.locator('.exec .m--lead .m-v').innerText()).trim();
+    await page.locator('button', { hasText: 'Pin to compare' }).click();
+    assert.strictEqual(await page.locator('.pin-tray li').count(), 1);
+    // another strategy on the same synthetic sessions (auto-run is on for synthetic data)
+    await page.locator('.strat-opt', { hasText: 'Opening range breakout' }).click();
+    await page.locator('.run-head h1', { hasText: 'Opening range breakout' }).waitFor({ timeout: 30000 });
+    await settled(page);
+    assert(/Compared with Short straddle/.test(await page.locator('.run-ctx').innerText()), 'the headline compares with the pinned run');
+    assert(/Short straddle · defaults: /.test(await page.locator('.exec .m--lead').innerText()), 'with the pinned figure beside the net');
+    await page.locator('button', { hasText: 'Pin to compare' }).click();
+    await page.locator('.strat-opt', { hasText: 'Strategy builder' }).click();
+    await page.locator('.run-head h1', { hasText: 'Iron condor' }).waitFor({ timeout: 30000 });
+    await settled(page);
+    await page.locator('.pin-tray button', { hasText: 'Compare' }).click();
+    await page.locator('#cmp-h', { hasText: 'Compare 3 runs' }).waitFor();
+    const net = await page.locator('.cmp-tbl tbody tr', { hasText: 'Net P&L' }).innerText();
+    assert(net.includes(first), `the pinned straddle's net (${first}) is in the table: ${net}`);
+    assert.strictEqual(await page.locator('#panel-compare .plot path.lnx').count(), 2, 'two pinned curves over the one on screen');
+    const l = await layout(page);
+    assert(l.sideways <= 1, `sideways ${l.sideways}`);
+    await page.screenshot({ path: path.join(SHOTS, 'compare.png'), fullPage: true });
+    await page.locator('.pin-tray .pin-x').first().click();
+    assert.strictEqual(await page.locator('.pin-tray li').count(), 1, 'unpinned from the tray');
+    await ctx.close();
+  });
   if (DAYS) {
     const isDone = (page) => page.waitForFunction(() => document.querySelector('.ws-status')?.getAttribute('data-state') === 'done', null, { timeout: 60000 });
     await step('day files: each is checked against its sha256, kept in this browser, and not downloaded again after a reload', async () => {

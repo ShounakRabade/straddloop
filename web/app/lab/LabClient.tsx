@@ -33,6 +33,7 @@ import { RollingView, type RollingState } from '@/components/lab/RollingView';
 import { Calendar } from '@/components/lab/Calendar';
 import { ResearchPanel } from '@/components/research/ResearchPanel';
 import { Exec, ResultTabs, headline, type Baseline, type TabId } from '@/components/lab/Results';
+import { ComparePanel, MAX_PINS, dataLabelOf, type Pin } from '@/components/lab/Compare';
 import { OptimiseView } from '@/components/optimise/OptimiseView';
 import { useOptimiser, type LoadDays } from '@/lib/optimiser/useOptimiser';
 import { configParams } from '@/lib/optimiser/controller';
@@ -43,12 +44,13 @@ const SOURCE_KEY = 'straddloop.source';
 const RAIL_KEY = 'straddloop.rail';
 const AUTO_KEY = 'straddloop.autorun';
 const ROLL_KEY = 'straddloop.rolling';
-const TAB_IDS: TabId[] = ['overview', 'capital', 'charts', 'trades', 'sessions', 'rolling', 'replay', 'research', 'diagnostics', 'ledger'];
+const TAB_IDS: TabId[] = ['overview', 'capital', 'charts', 'trades', 'legs', 'sessions', 'compare', 'rolling', 'replay', 'research', 'diagnostics', 'ledger'];
 const NO_STATUS: StatusRow[] = [];
 const ROLE_ORDER: TimeRole[] = ['entry', 'last_entry', 'exit'];
 type Source = 'synthetic' | 'real';
 type LocalDay = { path: string; date: string; buf?: ArrayBuffer };
-type Meta = { key: string; dataKey: string; isDefault: boolean };
+/** The settings a run was made with (kept with its result, so the header and a pin describe that run, not the panel now). */
+type Meta = { key: string; dataKey: string; isDefault: boolean; params: Params; label: string; detail: string };
 
 const GUIDE: { sec: SectionId | null; title: string; body: string }[] = [
   { sec: 'strategy', title: 'Choose a strategy and its legs', body: 'A published rule set, or a structure from the strategy builder. Builder legs can be edited one by one: side, type, strike, size, stop and target.' },
@@ -86,6 +88,7 @@ export function LabClient() {
   const [tab, setTabState] = useState<TabId>('overview');
   const [tried, setTried] = useState<string | null>(null);  // config key of the last run asked for
   const [meta, setMeta] = useState<Meta | null>(null);      // config of the result on screen
+  const [pins, setPins] = useState<Pin[]>([]);              // runs kept for the Compare tab (at most MAX_PINS)
   const [baseline, setBaseline] = useState<(Baseline & { key: string }) | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
   const [note, setNote] = useState('');
@@ -236,7 +239,9 @@ export function LabClient() {
     if (!canRun || loading) return;
     setTried(configKey);
     setSaved({ state: 'idle' });
-    const m: Meta = { key: configKey, dataKey, isDefault };
+    const m: Meta = { key: configKey, dataKey, isDefault, params,
+      label: `${strategy.short}${changed.length ? ` · ${changed[0]}${changed.length > 1 ? ` +${changed.length - 1}` : ''}` : ' · defaults'}`,
+      detail: changed.length ? changed.join(' · ') : 'Default rules' };
     if (!real) { pending.current = m; lab.run(runParams); return; }
     const r = range!;
     setDataErr(null);
@@ -263,7 +268,7 @@ export function LabClient() {
     const days: DayRef[] = r.files.map((f) => ({ path: f.path, buf: bufs.get(f.path)?.buf, sha256: bufs.get(f.path)?.sha256 ?? null }));
     pending.current = m;
     lab.run(runParams, days);
-  }, [canRun, loading, configKey, dataKey, isDefault, real, lab, range, local, runParams, shaOf]);
+  }, [canRun, loading, configKey, dataKey, isDefault, real, lab, range, local, runParams, shaOf, params, strategy.short, changed]);
   const runRef = useRef(runNow);
   runRef.current = runNow;
   useEffect(() => { if (lab.status === 'error' && lab.code === 'CHECKSUM' && lab.paths) forgetDays(lab.paths); }, [lab.status, lab.code, lab.paths]);
@@ -313,7 +318,13 @@ export function LabClient() {
   const r = r0 && (real ? !!r0.data : !r0.data) ? r0 : null;
   const stale = !!r && meta?.key !== configKey;
   const busy = lab.status === 'running' || !!loading;
-  const cmp = r && baseline && meta && baseline.strategy === slug && baseline.dataKey === meta.dataKey && baseline.key !== meta.key ? baseline : null;
+  const pinRef = r && meta ? pins.find((p) => p.dataKey === meta.dataKey && p.key !== meta.key) ?? null : null;
+  const cmp: Baseline | null = pinRef ? { label: pinRef.label, dataKey: pinRef.dataKey, strategy: pinRef.slug, m: pinRef.m }
+    : r && baseline && meta && baseline.strategy === slug && baseline.dataKey === meta.dataKey && baseline.key !== meta.key ? baseline : null;
+  const current: Pin | null = r && meta ? { key: meta.key, slug, label: meta.label, detail: meta.detail, dataKey: meta.dataKey, dataLabel: dataLabelOf(r, r.data ? undefined : meta.params.seed),
+    m: headline(r), curve: r.curve.map((p) => ({ d: p.d, v: p.v })), params: meta.params, hash: r.account?.report.generated.run_hash ?? null } : null;
+  const isPinned = !!current && pins.some((p) => p.key === current.key);
+  const togglePin = () => { if (!current) return; setPins((ps) => (ps.some((p) => p.key === current.key) ? ps.filter((p) => p.key !== current.key) : ps.length >= MAX_PINS ? ps : [...ps, current])); };
   const outcomes = useMemo(() => (r && !stale && r.days ? new Map(r.days.map((d) => [d.date, d])) : undefined), [r, stale]);
 
   // ---------- rolling windows: the same rules over successive windows of the selected period (real data)
@@ -383,6 +394,14 @@ export function LabClient() {
     else pickSource('synthetic');
     setView('results');
     pendingRun.current = andRun;
+  };
+  /** A pinned run's strategy and settings, back into the panel (pressed in the Compare tab). */
+  const loadPin = (p: Pin) => {
+    const s = labStrategy(p.slug);
+    if (!s) return;
+    setBeforeLoad(s.slug === slug ? params : null);
+    if (s.slug !== slug) { setSlug(s.slug); if (s.family === 'builder') lastBuilder.current = s.slug; }
+    setParams({ ...p.params });
   };
   /** Only ever called by the person pressing "Load" in the optimisation lab. */
   const loadFromStudy = (changes: Record<string, unknown>) => { setBeforeLoad(params); setParams((p) => ({ ...p, ...(changes as Params) })); };
@@ -767,19 +786,34 @@ export function LabClient() {
                   <h1>{strategy.name}</h1>
                   <div className="run-ctx">
                     <span>{r.data ? <>Real NIFTY {seriesName} · <b>{shortDate(r.data.from)} – {shortDate(r.data.to)}</b> · {r.data.days} sessions</> : isFourleg ? <>Synthetic · <b>{params.months} months</b></> : <>Synthetic · <b>{r.sessions} sessions</b> · seed {String(params.seed)}</>}</span>
-                    <span>{nChanged ? `${nChanged} changed from defaults` : 'Default rules'}</span>
-                    {cmp && <span>Compared with <b>{cmp.label}</b> · <button type="button" className="qlink" onClick={() => setBaseline(null)}>clear</button></span>}
+                    <span title={meta?.detail}>{meta?.detail === 'Default rules' ? 'Default rules' : `Changed: ${meta?.detail ?? ''}`}</span>
+                    {cmp && <span>Compared with <b>{cmp.label}</b> · <button type="button" className="qlink" onClick={() => (pinRef ? setPins((ps) => ps.filter((p) => p.key !== pinRef.key)) : setBaseline(null))}>{pinRef ? 'unpin' : 'clear'}</button></span>}
                     {r.account?.report.generated.run_hash && <span title="Run fingerprint: the same settings and data give the same hash">Run {r.account.report.generated.run_hash.slice(0, 8)}</span>}
                   </div>
                 </div>
                 <div className="run-actions">
-                  <button type="button" className="qbtn" aria-pressed={!!baseline && baseline.key === meta?.key} onClick={() => meta && setBaseline({ label: 'Pinned run', dataKey: meta.dataKey, strategy: slug, m: headline(r), key: meta.key })}>
-                    {baseline && baseline.key === meta?.key ? 'Baseline' : 'Pin as baseline'}
+                  <button type="button" className="qbtn" aria-pressed={isPinned} disabled={!isPinned && (pins.length >= MAX_PINS || stale)} onClick={togglePin}
+                    title={isPinned ? 'Remove it from the comparison' : pins.length >= MAX_PINS ? `At most ${MAX_PINS} runs: unpin one first` : stale ? 'Run the new settings first, so the pin matches its settings' : 'Keep this run to compare it with others on the same data'}>
+                    {isPinned ? 'Pinned' : 'Pin to compare'}
                   </button>
                   {r.account && <button type="button" className="qbtn" onClick={() => setTab('ledger')}>Export CSV</button>}
                   <button type="button" className="qbtn" aria-expanded={saveOpen} onClick={() => setSaveOpen((s) => !s)}>Save to notebook</button>
                 </div>
               </div>
+              {pins.length > 0 && (
+                <div className="pin-tray" role="region" aria-label="Pinned runs">
+                  <span className="lbl">Pinned {pins.length}/{MAX_PINS}</span>
+                  <ul>
+                    {pins.map((p) => (
+                      <li key={p.key} data-other={current && p.dataKey !== current.dataKey ? '' : undefined} title={`${p.detail} · ${p.dataLabel}`}>
+                        <span className="pin-l">{p.label}</span><span className={`pin-v ${(p.m.net ?? 0) > 0 ? 'gain' : (p.m.net ?? 0) < 0 ? 'loss' : ''}`}>{p.m.net == null ? '—' : inr(p.m.net, { sign: true })}</span>
+                        <button type="button" className="pin-x" aria-label={`Unpin ${p.label}`} onClick={() => setPins((ps) => ps.filter((x) => x.key !== p.key))}>×</button>
+                      </li>
+                    ))}
+                  </ul>
+                  <button type="button" className="qlink" onClick={() => setTab('compare')}>Compare</button>
+                </div>
+              )}
               {busy && phase && (
                 <div className="runbar" role="status" aria-live="polite">
                   <span>{phase.long}</span>
@@ -812,7 +846,9 @@ export function LabClient() {
               <ResultTabs r={r} lab={lab} range={range} real={real} slip={Number(params.slip_pct ?? NaN)} tab={tab} setTab={setTab}
                 research={<ResearchPanel r={r} lab={lab} params={params} msPerRun={Math.max(5, lab.ms)} meta={researchMeta} partial={real && range ? range.counts.partial : 0} dataNote={dataNote} onLoad={loadFromStudy} />}
                 rolling={rollingState.status === 'off' ? undefined : <RollingView state={rollingState} onCancel={() => rollCancel.current?.()} onRetry={() => setRollRun(null)} onOpen={(w) => setRequest(w)} stamp={slug} />}
-                rollingCount={plan?.windows.length} />
+                rollingCount={plan?.windows.length}
+                compare={pins.length ? <ComparePanel current={current} pins={pins} onRemove={(k) => setPins((ps) => ps.filter((p) => p.key !== k))} onLoad={loadPin} /> : undefined}
+                compareCount={pins.length ? pins.length : undefined} />
             </>
           )}
           <p className="foot-legal">Straddloop is a research tool. Real-data runs use 1-minute candles without bid/ask, so fills are optimistic. Nothing here is investment advice or a recommendation to trade. Options trading can lose more than the premium involved. Straddloop does not place orders.</p>

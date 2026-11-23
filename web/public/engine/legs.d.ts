@@ -8,5 +8,7 @@ declare const Legs: {
   LEG_LEVELS: string[];
   POS_LEVELS: string[];
   MAX_ENTRIES: number;
+  /** Rupee value at expiry of legs [{ action, right, strike, qty, entry_px }] for index level S (before charges). */
+  payoffAt(legs: { action: 'BUY' | 'SELL'; right: 'CE' | 'PE'; strike: number; qty: number; entry_px: number }[], S: number): number;
 };
 export = Legs;

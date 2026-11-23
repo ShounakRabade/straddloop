@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased: results, comparison and polish
+
+* **Legs tab** for every strategy with a ledger: one row per leg (the structure's legs L1, L2, … for builder
+  strategies; call and put, with re-entries apart, for the published rules) with how many were booked, how many
+  won, net, average, best and worst, how often a stop or a target closed it, charges and what closed it. The rows
+  add up to the run's net P&L. Builder strategies also get **positions** (won and lost, average win and loss and their
+  ratio, per-position figures, held overnight, and every exit reason with its count and net) and the **payoff at
+  expiry** of any position: its value by index level from the entry prices, before charges, with strikes,
+  breakevens, the most it can make and lose (or unlimited) and the index at entry. The caption says what the position
+  actually did, so the shape is never mistaken for the result.
+* **Compare tray**, replacing the single baseline: pin up to 4 runs (Pin to compare); the tray above the results
+  lists them with their net, and the Compare tab sets them beside the run on screen, on the same data only: their
+  cumulative curves on one chart and every headline figure in one table, each with its settings and run fingerprint;
+  Load settings puts a pinned run's strategy and settings back in the panel. Pins on other data are listed apart, not
+  compared. The headline deltas compare with the first pin on the same data (otherwise the default rules, as before).
+* The run header describes the run on screen ("Changed: …"), not the panel as it is now.
+* Result tabs: Capital and Ledger have short names and the tabs sit a little closer. When they are still wider than the
+  space (twelve tabs on real data, or a narrow window), the strip fades at the edge that has more, and the open tab is
+  scrolled into view.
+
 ## Unreleased: run reliability and speed
 
 * **Progress you can trust, and Cancel.** A run says what it is doing, with counts from the engine: downloading

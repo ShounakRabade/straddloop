@@ -101,6 +101,8 @@ export interface PositionRecord {
   id: string;
   opened: { date: string; t: number };
   closed: { date: string; t: number } | null;
+  /** the index at entry */
+  spot: number;
   legs: PositionLeg[];
   entry_premium: number;
   exit_reason: string;

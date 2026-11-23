@@ -4,7 +4,7 @@
  * sessions, replay, diagnostics, ledger). Every figure is read from the run result, its ledger report or the
  * ledger rows the worker returns; nothing here estimates or smooths a number.
  */
-import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { exitLabel, inr, inr2, num2, pct2, shortDate } from '@/lib/format';
 import { GLOSSARY } from '@/lib/glossary';
 import { narrate, byExit } from '@/lib/narrative';
@@ -19,6 +19,7 @@ import { Capital as CapitalTable, CostTable, LedgerTab, Performance, Risk, Summa
 import { ReplayPanel } from '@/components/Replay';
 import { BarPlot, Histogram, LinePlot, compactInr } from './Plot';
 import { Tradebook } from './Tradebook';
+import { LegsPanel } from './LegsPanel';
 import { Tip } from './kit';
 
 export type LabApi = {
@@ -27,7 +28,7 @@ export type LabApi = {
   replay: (date: string) => Promise<import('@/lib/types').Replay | null>;
 };
 export type Baseline = { label: string; dataKey: string; strategy: string; m: Record<string, number | null> };
-export type TabId = 'overview' | 'capital' | 'charts' | 'trades' | 'sessions' | 'rolling' | 'replay' | 'research' | 'diagnostics' | 'ledger';
+export type TabId = 'overview' | 'capital' | 'charts' | 'trades' | 'legs' | 'sessions' | 'compare' | 'rolling' | 'replay' | 'research' | 'diagnostics' | 'ledger';
 
 const tone = (v: number | null | undefined) => (v == null ? '' : v > 0 ? 'gain' : v < 0 ? 'loss' : '');
 const n = (v: unknown) => (typeof v === 'number' && isFinite(v) ? v : null);
@@ -438,16 +439,18 @@ function LedgerPanel({ r, lab, stamp }: { r: RunResult; lab: LabApi; stamp: stri
 }
 
 const TABS: { id: TabId; label: string }[] = [
-  { id: 'overview', label: 'Overview' }, { id: 'capital', label: 'Capital & margin' }, { id: 'charts', label: 'Charts' }, { id: 'trades', label: 'Trades' },
-  { id: 'sessions', label: 'Sessions' }, { id: 'rolling', label: 'Rolling' }, { id: 'replay', label: 'Replay' }, { id: 'research', label: 'Research' }, { id: 'diagnostics', label: 'Diagnostics' }, { id: 'ledger', label: 'Ledger & export' },
+  { id: 'overview', label: 'Overview' }, { id: 'capital', label: 'Capital' }, { id: 'charts', label: 'Charts' }, { id: 'trades', label: 'Trades' }, { id: 'legs', label: 'Legs' },
+  { id: 'sessions', label: 'Sessions' }, { id: 'compare', label: 'Compare' }, { id: 'rolling', label: 'Rolling' }, { id: 'replay', label: 'Replay' }, { id: 'research', label: 'Research' }, { id: 'diagnostics', label: 'Diagnostics' }, { id: 'ledger', label: 'Ledger' },
 ];
 
-export function ResultTabs({ r, lab, range, real, slip, tab, setTab, research, rolling, rollingCount }: {
+export function ResultTabs({ r, lab, range, real, slip, tab, setTab, research, rolling, rollingCount, compare, compareCount }: {
   r: RunResult; lab: LabApi; range: DateRange | null; real: boolean; slip: number | undefined; tab: TabId; setTab: (t: TabId) => void;
   /** The research panel. It mounts the first time its tab opens and then stays mounted, so a running study survives a tab change. */
   research?: React.ReactNode;
   /** Rolling-window results (real data, when the mode is on); the tab is shown only then. */
   rolling?: React.ReactNode; rollingCount?: number;
+  /** The comparison of pinned runs; the tab is shown once a run is pinned. */
+  compare?: React.ReactNode; compareCount?: number;
 }) {
   const [researchSeen, setResearchSeen] = useState(false);
   useEffect(() => { if (tab === 'research') setResearchSeen(true); }, [tab]);
@@ -465,9 +468,10 @@ export function ResultTabs({ r, lab, range, real, slip, tab, setTab, research, r
     return () => { live = false; };
   }, [rev, inspect, r.account]);
   const replayable = r.strategy !== 'fourleg' && r.curve.length > 0;
-  const tabs = TABS.filter((t) => (t.id !== 'replay' || replayable) && (t.id !== 'research' || !!research) && (t.id !== 'rolling' || rolling != null));
+  const tabs = TABS.filter((t) => (t.id !== 'replay' || replayable) && (t.id !== 'research' || !!research) && (t.id !== 'rolling' || rolling != null)
+    && (t.id !== 'compare' || compare != null) && (t.id !== 'legs' || !!r.account));
   if (!tabs.some((t) => t.id === tab)) tab = 'overview';
-  const counts: Partial<Record<TabId, number>> = { trades: trades?.length, sessions: r.days?.length, rolling: rollingCount };
+  const counts: Partial<Record<TabId, number>> = { trades: trades?.length, sessions: r.days?.length, rolling: rollingCount, compare: compareCount };
   const m = r.account?.report.margin;
   const alarms = m ? [
     Number(m.rejected_trades) ? `${m.rejected_trades} trade${Number(m.rejected_trades) === 1 ? ' was' : 's were'} rejected for insufficient margin and ${Number(m.rejected_trades) === 1 ? 'is' : 'are'} not in the P&L.` : null,
@@ -475,6 +479,31 @@ export function ResultTabs({ r, lab, range, real, slip, tab, setTab, research, r
     Number(m.negative_balance_events) ? `The balance went below zero ${m.negative_balance_events} time${Number(m.negative_balance_events) === 1 ? '' : 's'}.` : null,
     r.account && !r.account.report.reconciliation.ok ? 'Reconciliation failed: do not rely on these figures.' : null,
   ].filter((x): x is string => !!x) : [];
+  // when the tabs are wider than the space, the strip fades at the edge that has more, and the open tab is kept in view
+  const strip = useRef<HTMLDivElement>(null);
+  const [more, setMore] = useState<'' | 'left' | 'right' | 'both'>('');
+  useEffect(() => {
+    const el = strip.current;
+    if (!el) return;
+    // by where the first and last tabs sit (the strip has padding at both ends, which is not 'more')
+    const upd = () => {
+      const first = el.firstElementChild as HTMLElement | null, last = el.lastElementChild as HTMLElement | null;
+      if (!first || !last) { setMore(''); return; }
+      const l = first.offsetLeft < el.scrollLeft - 2, rt = last.offsetLeft + last.offsetWidth > el.scrollLeft + el.clientWidth + 2;
+      setMore(l && rt ? 'both' : l ? 'left' : rt ? 'right' : '');
+    };
+    upd();
+    el.addEventListener('scroll', upd, { passive: true });
+    const ro = new ResizeObserver(upd); ro.observe(el);
+    return () => { el.removeEventListener('scroll', upd); ro.disconnect(); };
+  }, [tabs.length]);
+  useEffect(() => { // sideways only: the page itself never moves
+    const el = strip.current, b = document.getElementById(`tab-${tab}`);
+    if (!el || !b) return;
+    const l = b.offsetLeft, rt = l + b.offsetWidth;
+    if (l < el.scrollLeft) el.scrollLeft = Math.max(0, l - 16);
+    else if (rt > el.scrollLeft + el.clientWidth) el.scrollLeft = rt - el.clientWidth + 16;
+  }, [tab, tabs.length]);
   const go = (t: TabId) => setTab(t);
   const replay = (d: string) => { setReplayDate(d); setTab('replay'); };
   const stamp = r.account ? `${r.strategy}-${r.account.report.range.from ?? 'x'}_${r.account.report.range.to ?? 'x'}-${(r.account.report.generated.run_hash ?? '').slice(0, 6)}` : r.strategy;
@@ -494,7 +523,7 @@ export function ResultTabs({ r, lab, range, real, slip, tab, setTab, research, r
           <button type="button" className="qlink" onClick={() => setTab('capital')}>See capital &amp; margin</button>
         </div>
       )}
-      <div className="tabs2" role="tablist" aria-label="Result views" onKeyDown={onKey}>
+      <div ref={strip} className="tabs2" data-more={more || undefined} role="tablist" aria-label="Result views" onKeyDown={onKey}>
         {tabs.map((t) => (
           <button key={t.id} id={`tab-${t.id}`} type="button" role="tab" aria-selected={tab === t.id} aria-controls={`panel-${t.id}`} tabIndex={tab === t.id ? 0 : -1} onClick={() => setTab(t.id)}>
             {t.label}{counts[t.id] != null && <span className="cnt">{counts[t.id]}</span>}
@@ -511,7 +540,9 @@ export function ResultTabs({ r, lab, range, real, slip, tab, setTab, research, r
               : <Tradebook trades={trades} fills={fills} onReplay={replayable ? replay : undefined} />}
         </div>
       )}
+      {tab === 'legs' && <LegsPanel r={r} trades={trades} />}
       {tab === 'sessions' && <SessionsPanel r={r} range={real ? range : null} onReplay={replay} />}
+      {tab === 'compare' && compare != null && compare}
       {tab === 'rolling' && rolling != null && <div className="panel" role="tabpanel" id="panel-rolling" aria-labelledby="tab-rolling">{rolling}</div>}
       {tab === 'replay' && replayable && (
         <div className="panel" role="tabpanel" id="panel-replay" aria-labelledby="tab-replay">
